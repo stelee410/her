@@ -61,7 +61,7 @@ final class InitializationPage {
     static Views renderHome(MainActivity activity, HerUi ui, Model model, Callbacks callbacks) {
         HerUi.Root rootState = ui.baseRoot(model.mood);
         FrameLayout root = rootState.frame;
-        root.addView(ui.topBar("☰", "", "", callbacks::onSettings, null));
+        root.addView(ui.topBar("☰", "", "Aa", callbacks::onSettings, callbacks::onChat));
 
         LinearLayout center = new LinearLayout(activity);
         center.setOrientation(LinearLayout.VERTICAL);
@@ -113,6 +113,7 @@ final class InitializationPage {
 
     interface Callbacks {
         void onSettings();
+        void onChat();
         void onToggleMic();
         boolean isSummarizing();
     }

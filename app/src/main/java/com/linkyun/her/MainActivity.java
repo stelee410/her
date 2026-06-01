@@ -1,19 +1,33 @@
 package com.linkyun.her;
 
+import android.animation.ValueAnimator;
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.location.Location;
+import android.location.LocationManager;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import android.os.Build;
 import android.os.SystemClock;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.provider.Settings;
+import android.speech.RecognizerIntent;
+import android.util.Log;
 import android.view.Gravity;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
+import android.view.WindowManager;
+import android.view.animation.AccelerateDecelerateInterpolator;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -43,6 +57,7 @@ public class MainActivity extends Activity {
     private static final String TAG = "HerRealtime";
     private static final int REQ_AUDIO = 71;
     private static final int REQ_NOTIFY = 72;
+    private static final int REQ_LOCATION = 73;
     private static final boolean HALF_DUPLEX = true;
     private static final boolean CONTINUOUS_CONVERSATION = true;
     private static final int VAD_SPEECH_THRESHOLD = 520;
@@ -52,11 +67,13 @@ public class MainActivity extends Activity {
     private static final int COMPACT_MESSAGE_THRESHOLD = 10;
     private static final int COMPACT_CHAR_THRESHOLD = 3000;
     private static final int RECENT_SESSION_MESSAGES = 16;
+    private static final long CHAT_ACTIVE_UNLOCK_MS = 60_000;
+    private static final long HEADSET_DOUBLE_TAP_MS = 520;
     private static final String USER_MEMORY_FILE = "user.md";
     private static final String AGENT_MEMORY_FILE = "Agent.md";
     private static final String SYSTEM_AGENT_NAME = "Doris";
     private static final String TEXT_CHAT_MODEL = "c-her";
-    private static final String SUBCONSCIOUS_MODEL = "mimo-v2.5";
+    private static final String BACKGROUND_MODEL = "c-her";
     private static final String DEFAULT_VOICE = BuildConfig.AGENTVOICE_CLONED_VOICE;
     private static final String INSTRUCTIONS =
             "你是一个像 Her 里那样亲密、聪明、有温度的中文陪伴式语音助手。\n" +
@@ -65,7 +82,7 @@ public class MainActivity extends Activity {
             "当用户焦虑、孤独、疲惫或犹豫时，先共情，再给一个轻柔可执行的下一步。";
     private static final String INIT_BASE_PROMPT =
             "你是 Doris，一个 AI Agent，也是用户的朋友和助理。\n" +
-            "你是语音交互模型，负责自然说话和倾听；mimo-v2.5 是潜意识模型，负责后台判断与写入长期记忆。\n" +
+            "你是语音交互模型，负责自然说话和倾听；c-her 是后台意识模型，负责工具调用、总结与写入长期记忆。\n" +
             "你正在进行首次初始化，不是普通聊天。目标是温柔、自然地收集三类信息：用户姓名/希望被如何称呼、用户希望和 Doris 的关系、用户的故事。\n" +
             "用户的故事是一段开放式自我介绍，可以包括近况、经历、在意的事、期待、边界或希望你记住的内容。\n" +
             "每次只问一个问题，回复要短，不要展开闲聊，不要一次列清单。";
@@ -93,6 +110,7 @@ public class MainActivity extends Activity {
         }
 
         @Override public void onRealtimeAudio(byte[] bytes) {
+            if (discardRealtimeAudioUntilDone) return;
             player.play(bytes);
         }
 
@@ -113,8 +131,12 @@ public class MainActivity extends Activity {
             .build();
     private final MicStreamer mic = new MicStreamer();
     private final PcmPlayer player = new PcmPlayer(TAG);
+    private HeadsetBindingManager headsets;
     private MemoryStore memoryStore;
     private AgentApiClient agents;
+    private WeatherTool weatherTool;
+    private NewsTool newsTool;
+    private MediaSession headsetMediaSession;
     private HerUi ui;
 
     private FrameLayout root;
@@ -138,14 +160,30 @@ public class MainActivity extends Activity {
     private int realtimeRetryCount = 0;
     private int initUserTurns = 0;
     private boolean pendingMicStart = false;
+    private boolean pendingVoiceWakeIntent = false;
+    private boolean headsetDialogShowing = false;
+    private boolean pendingRealtimeWeatherAnswer = false;
+    private boolean pendingRealtimeNewsAnswer = false;
+    private boolean pendingNewsToolAfterAck = false;
+    private boolean discardRealtimeAudioUntilDone = false;
+    private boolean pendingWeatherRealtime = false;
     private boolean compactInProgress = false;
     private boolean memoryDirtyForRealtime = false;
     private boolean inputAudioOpen = false;
     private boolean vadSpeechStarted = false;
     private int vadSilenceFrames = 0;
     private int vadFrames = 0;
+    private int toolRouteSeq = 0;
     private String pendingText = null;
+    private String pendingWeatherQuestion = null;
+    private String latestWeatherFact = "";
+    private String latestNewsFact = "";
+    private String pendingNewsQuestion = null;
+    private String pendingWeatherBroadcastPrompt = null;
+    private String pendingNewsBroadcastPrompt = null;
     private String activeAssistantId = null;
+    private WeatherTool.WeatherResult latestVoiceWeather = null;
+    private NewsTool.NewsResult latestVoiceNews = null;
     private LinearLayout messageList;
     private ScrollView messageScroll;
     private EditText composer;
@@ -161,6 +199,14 @@ public class MainActivity extends Activity {
     private MoodVeil moodVeil;
     private Runnable homeClockTicker;
     private Runnable initProgressTicker;
+    private Runnable voiceWeatherTimeout;
+    private Runnable voiceNewsTimeout;
+    private Runnable conversationLockTimeout;
+    private boolean conversationOverLockscreen = false;
+    private PowerManager.WakeLock replyWakeLock;
+    private ValueAnimator replyBrightnessAnimator;
+    private float replyOriginalBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+    private long lastHeadsetClickAt = 0;
     private long summaryStartedAt = 0;
     private final Set<String> persistedMessageIds = new LinkedHashSet<>();
 
@@ -176,11 +222,16 @@ public class MainActivity extends Activity {
 
         ui = new HerUi(this);
         agents = new AgentApiClient(llmHttp, main);
+        weatherTool = new WeatherTool(llmHttp, main);
+        newsTool = new NewsTool(llmHttp, main);
         voices.add(new Voice(DEFAULT_VOICE, "Doris Clone", "female"));
         voices.add(new Voice("zh_female_roumeinvyou_emo_v2_mars_bigtts", "柔美女友（多情感）", "female"));
         voices.add(new Voice("zh_female_gaolengyujie_emo_v2_mars_bigtts", "高冷御姐（多情感）", "female"));
         voices.add(new Voice("zh_male_ruyayichen_emo_v2_mars_bigtts", "儒雅男友（多情感）", "male"));
         SharedPreferences prefs = getSharedPreferences("her", MODE_PRIVATE);
+        headsets = new HeadsetBindingManager(this, prefs, this::onHeadsetDevicesChanged);
+        headsets.start();
+        setupHeadsetMediaSession();
         memoryStore = new MemoryStore(this);
         agentName = SYSTEM_AGENT_NAME;
         prefs.edit().putString("agent_name", SYSTEM_AGENT_NAME).apply();
@@ -202,12 +253,21 @@ public class MainActivity extends Activity {
             beginInitialization(agentName);
         }
         loadVoices();
+        handleVoiceCommandIntent(getIntent());
     }
 
     @Override
     protected void onDestroy() {
         if (homeClockTicker != null) main.removeCallbacks(homeClockTicker);
         if (initProgressTicker != null) main.removeCallbacks(initProgressTicker);
+        if (voiceWeatherTimeout != null) main.removeCallbacks(voiceWeatherTimeout);
+        if (voiceNewsTimeout != null) main.removeCallbacks(voiceNewsTimeout);
+        if (conversationLockTimeout != null) main.removeCallbacks(conversationLockTimeout);
+        clearConversationOverLockscreen();
+        restoreReplyScreenBrightness();
+        releaseReplyWakeLock();
+        releaseHeadsetMediaSession();
+        if (headsets != null) headsets.stop();
         mic.stop();
         player.stop();
         realtime.close();
@@ -216,10 +276,224 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleVoiceCommandIntent(intent);
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (event != null && event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            markConversationInteraction(false);
+        }
+        return super.dispatchTouchEvent(event);
+    }
+
+    private void handleVoiceCommandIntent(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        if (!isAssistantLaunchAction(action)) return;
+        showOverLockscreenForAssistantLaunch();
+        if (initialized) {
+            showVoiceHome();
+        } else if (initializing) {
+            showInitializationHome();
+        } else {
+            beginInitialization(agentName);
+        }
+        main.postDelayed(() -> {
+            if (isBoundHeadsetConnected()) {
+                startVoiceFromAssistantCommand();
+            } else {
+                showHeadsetPrompt(true);
+            }
+        }, 240);
+    }
+
+    private boolean isAssistantLaunchAction(String action) {
+        return Intent.ACTION_VOICE_COMMAND.equals(action) ||
+                Intent.ACTION_ASSIST.equals(action) ||
+                RecognizerIntent.ACTION_VOICE_SEARCH_HANDS_FREE.equals(action) ||
+                RecognizerIntent.ACTION_WEB_SEARCH.equals(action) ||
+                "android.intent.action.SEARCH_LONG_PRESS".equals(action);
+    }
+
+    private void showOverLockscreenForAssistantLaunch() {
+        markConversationInteraction(true);
+    }
+
+    private void markConversationInteraction(boolean turnScreenOn) {
+        allowConversationOverLockscreen(turnScreenOn);
+        if (conversationLockTimeout != null) main.removeCallbacks(conversationLockTimeout);
+        conversationLockTimeout = () -> {
+            conversationLockTimeout = null;
+            clearConversationOverLockscreen();
+        };
+        main.postDelayed(conversationLockTimeout, CHAT_ACTIVE_UNLOCK_MS);
+    }
+
+    private void allowConversationOverLockscreen(boolean turnScreenOn) {
+        conversationOverLockscreen = true;
+        Window window = getWindow();
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(true);
+            if (turnScreenOn) setTurnScreenOn(true);
+        } else {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED);
+            if (turnScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+        }
+        if (turnScreenOn) acquireReplyWakeLock();
+    }
+
+    private void clearConversationOverLockscreen() {
+        conversationOverLockscreen = false;
+        Window window = getWindow();
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(false);
+            setTurnScreenOn(false);
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+        }
+    }
+
+    private void startVoiceFromAssistantCommand() {
+        if (summaryInProgress || mic.running || inputAudioOpen) return;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            return;
+        }
+        if (!realtime.isOpen()) {
+            pendingVoiceWakeIntent = true;
+            realtime.connect();
+            return;
+        }
+        player.stop();
+        realtime.sendEvent("input_audio.interrupt", json("reason", "assistant_launch"));
+        startInputAudio();
+    }
+
+    private void setupHeadsetMediaSession() {
+        if (headsetMediaSession != null) return;
+        headsetMediaSession = new MediaSession(this, TAG + ":headset");
+        headsetMediaSession.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS);
+        headsetMediaSession.setCallback(new MediaSession.Callback() {
+            @Override public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+                KeyEvent event = mediaButtonIntent == null
+                        ? null
+                        : mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+                return handleHeadsetKeyEvent(event);
+            }
+
+            @Override public void onPlay() {
+                handleHeadsetTransportClick();
+            }
+
+            @Override public void onPause() {
+                handleHeadsetTransportClick();
+            }
+
+            @Override public void onSkipToNext() {
+                interruptCurrentConversationFromHeadset();
+            }
+        }, main);
+        long actions = PlaybackState.ACTION_PLAY_PAUSE |
+                PlaybackState.ACTION_PLAY |
+                PlaybackState.ACTION_PAUSE |
+                PlaybackState.ACTION_SKIP_TO_NEXT |
+                PlaybackState.ACTION_STOP;
+        headsetMediaSession.setPlaybackState(new PlaybackState.Builder()
+                .setActions(actions)
+                .setState(PlaybackState.STATE_PLAYING, 0, 1f)
+                .build());
+        headsetMediaSession.setActive(true);
+    }
+
+    private boolean handleHeadsetKeyEvent(KeyEvent event) {
+        if (event == null || event.getAction() != KeyEvent.ACTION_DOWN || event.getRepeatCount() > 0) {
+            return false;
+        }
+        int keyCode = event.getKeyCode();
+        if (keyCode == KeyEvent.KEYCODE_MEDIA_NEXT) {
+            interruptCurrentConversationFromHeadset();
+            return true;
+        }
+        if (keyCode != KeyEvent.KEYCODE_HEADSETHOOK &&
+                keyCode != KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE &&
+                keyCode != KeyEvent.KEYCODE_MEDIA_PLAY &&
+                keyCode != KeyEvent.KEYCODE_MEDIA_PAUSE) {
+            return false;
+        }
+        long now = SystemClock.uptimeMillis();
+        if (now - lastHeadsetClickAt <= HEADSET_DOUBLE_TAP_MS) {
+            lastHeadsetClickAt = 0;
+            interruptCurrentConversationFromHeadset();
+        } else {
+            lastHeadsetClickAt = now;
+        }
+        return true;
+    }
+
+    private void handleHeadsetTransportClick() {
+        long now = SystemClock.uptimeMillis();
+        if (now - lastHeadsetClickAt <= HEADSET_DOUBLE_TAP_MS) {
+            lastHeadsetClickAt = 0;
+            interruptCurrentConversationFromHeadset();
+        } else {
+            lastHeadsetClickAt = now;
+        }
+    }
+
+    private void interruptCurrentConversationFromHeadset() {
+        Log.d(TAG, "headset double tap interrupt");
+        markConversationInteraction(false);
+        discardRealtimeAudioUntilDone = true;
+        player.stop();
+        persistActiveAssistantMessage();
+        activeAssistantId = null;
+        pendingWeatherBroadcastPrompt = null;
+        pendingNewsBroadcastPrompt = null;
+        pendingNewsQuestion = null;
+        pendingNewsToolAfterAck = false;
+        pendingRealtimeWeatherAnswer = false;
+        pendingRealtimeNewsAnswer = false;
+        if (realtime.isOpen()) {
+            realtime.sendEvent("input_audio.interrupt", json("reason", "headset_double_tap"));
+        }
+        if (mic.running || inputAudioOpen) {
+            stopInputAudio("ready");
+        } else {
+            setState("ready");
+        }
+    }
+
+    private void releaseHeadsetMediaSession() {
+        if (headsetMediaSession == null) return;
+        headsetMediaSession.setActive(false);
+        headsetMediaSession.release();
+        headsetMediaSession = null;
+    }
+
+    @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
         super.onRequestPermissionsResult(requestCode, permissions, grants);
         if (requestCode == REQ_AUDIO && grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) {
             toggleMic();
+        } else if (requestCode == REQ_LOCATION && grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) {
+            String question = pendingWeatherQuestion;
+            boolean realtimeWeather = pendingWeatherRealtime;
+            pendingWeatherQuestion = null;
+            pendingWeatherRealtime = false;
+            if (question != null) runWeatherTool(question, null, realtimeWeather);
+        } else if (requestCode == REQ_LOCATION) {
+            String question = pendingWeatherQuestion;
+            boolean realtimeWeather = pendingWeatherRealtime;
+            pendingWeatherQuestion = null;
+            pendingWeatherRealtime = false;
+            if (question != null) {
+                weatherCallback(question, realtimeWeather).onError("没有定位权限，请告诉我城市名。");
+            }
         }
     }
 
@@ -242,16 +516,47 @@ public class MainActivity extends Activity {
     }
 
     private void showHome() {
+        clearVoiceWeatherCard(false);
+        clearVoiceNewsCard(false);
+        messageList = null;
+        messageScroll = null;
+        composer = null;
+        voiceLastTurnView = null;
+        voiceOrbView = null;
+        audioLevelView = null;
+        micButton = null;
+        if (homeClockTicker != null) main.removeCallbacks(homeClockTicker);
+        HomePage.Views views = HomePage.renderLanding(this, ui,
+                new HomePage.LandingModel(displayUserName(), agentName, moodForText(lastConversationLine())),
+                new HomePage.Callbacks() {
+                    @Override public void onSettings() { showSettings(); }
+                    @Override public void onChat() { showChat(); }
+                    @Override public void onVoiceHome() { showVoiceHome(); }
+                    @Override public void onToggleMic() { toggleMic(); }
+                });
+        root = views.root;
+        moodVeil = views.moodVeil;
+        stateLabel = null;
+        homeTimeView = views.homeTimeView;
+        handwrittenNameView = views.handwrittenNameView;
+        setContentView(root);
+        animateAgentName();
+        startHomeClock();
+    }
+
+    private void showVoiceHome() {
         messageList = null;
         messageScroll = null;
         composer = null;
         homeTimeView = null;
+        handwrittenNameView = null;
         if (homeClockTicker != null) main.removeCallbacks(homeClockTicker);
-        HomePage.Views views = HomePage.render(this, ui,
-                new HomePage.Model(lastConversationLine(), capitalize(state), moodForText(lastConversationLine())),
+        HomePage.Views views = HomePage.renderVoice(this, ui,
+                new HomePage.VoiceModel(lastConversationLine(), stateLabelText(), moodForText(lastConversationLine()), latestVoiceWeather, latestVoiceNews),
                 new HomePage.Callbacks() {
                     @Override public void onSettings() { showSettings(); }
                     @Override public void onChat() { showChat(); }
+                    @Override public void onVoiceHome() { showVoiceHome(); }
                     @Override public void onToggleMic() { toggleMic(); }
                 });
         root = views.root;
@@ -263,7 +568,7 @@ public class MainActivity extends Activity {
         micButton = views.micButton;
         setContentView(root);
         updateVoiceHome();
-        if (!realtime.isOpen()) realtime.connect();
+        if (isBoundHeadsetConnected() && !realtime.isOpen()) realtime.connect();
     }
 
     private String displayUserName() {
@@ -341,6 +646,17 @@ public class MainActivity extends Activity {
         inputAudioOpen = false;
         pendingMicStart = false;
         pendingText = null;
+        pendingWeatherQuestion = null;
+        pendingWeatherBroadcastPrompt = null;
+        pendingRealtimeWeatherAnswer = false;
+        latestWeatherFact = "";
+        pendingNewsBroadcastPrompt = null;
+        pendingNewsQuestion = null;
+        pendingNewsToolAfterAck = false;
+        pendingRealtimeNewsAnswer = false;
+        latestNewsFact = "";
+        clearVoiceWeatherCard(false);
+        clearVoiceNewsCard(false);
         activeAssistantId = null;
         messages.clear();
         setState("idle");
@@ -348,6 +664,8 @@ public class MainActivity extends Activity {
     }
 
     private void showInitialize() {
+        clearVoiceWeatherCard(false);
+        clearVoiceNewsCard(false);
         homeTimeView = null;
         InitializationPage.Views views = InitializationPage.renderSetup(this, ui, agentName, this::showSettings, name -> {
             String value = name.trim();
@@ -376,20 +694,28 @@ public class MainActivity extends Activity {
         initUserTurns = 0;
         activeAssistantId = null;
         messages.clear();
+        if (!isBoundHeadsetConnected()) {
+            messages.add(new Message("init-text-only", "assistant",
+                    "我是 Doris。先用文字也可以。你希望我怎么称呼你？"));
+            setState("text_only");
+        }
         showInitializationHome();
         realtime.close();
-        realtime.connect();
+        if (isBoundHeadsetConnected()) realtime.connect();
     }
 
     private void showInitializationHome() {
+        clearVoiceWeatherCard(false);
+        clearVoiceNewsCard(false);
         messageList = null;
         messageScroll = null;
         composer = null;
         homeTimeView = null;
         InitializationPage.Views views = InitializationPage.renderHome(this, ui,
-                new InitializationPage.Model(initProgressText(), lastInitializationLine(), capitalize(state), moodForText(lastInitializationLine())),
+                new InitializationPage.Model(initProgressText(), lastInitializationLine(), stateLabelText(), moodForText(lastInitializationLine())),
                 new InitializationPage.Callbacks() {
                     @Override public void onSettings() { showSettings(); }
+                    @Override public void onChat() { showChat(); }
                     @Override public void onToggleMic() { toggleMic(); }
                     @Override public boolean isSummarizing() { return summaryInProgress; }
                 });
@@ -404,6 +730,8 @@ public class MainActivity extends Activity {
     }
 
     private void showChat() {
+        clearVoiceWeatherCard(false);
+        clearVoiceNewsCard(false);
         if (mic.running || inputAudioOpen) stopInputAudio("ready");
         homeTimeView = null;
         voiceLastTurnView = null;
@@ -411,10 +739,10 @@ public class MainActivity extends Activity {
         audioLevelView = null;
         micButton = null;
         ChatPage.Views views = ChatPage.render(this, ui,
-                new ChatPage.Model(agentName, capitalize(state), initializing, initProgressText(), moodForText(lastConversationLine()), messages),
+                new ChatPage.Model(agentName, stateLabelText(), initializing, initProgressText(), moodForText(lastConversationLine()), messages),
                 new ChatPage.Callbacks() {
-                    @Override public void onBack() { if (initialized) showHome(); else showInitialize(); }
-                    @Override public void onVoiceHome() { if (initialized) showHome(); else showSettings(); }
+                    @Override public void onBack() { if (initialized) openVoiceSurface(); else showInitializationHome(); }
+                    @Override public void onVoiceHome() { openVoiceSurface(); }
                     @Override public void onSend(String text) { sendText(text); }
                 });
         root = views.root;
@@ -427,7 +755,20 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
+    private void openVoiceSurface() {
+        if (initialized) {
+            showVoiceHome();
+        } else if (initializing) {
+            showInitializationHome();
+        }
+        if (!isBoundHeadsetConnected()) {
+            main.postDelayed(() -> showHeadsetPrompt(true), 160);
+        }
+    }
+
     private void showVoices() {
+        clearVoiceWeatherCard(false);
+        clearVoiceNewsCard(false);
         root = baseRoot();
         root.addView(topBar("‹", "Voices", "", this::showSettings, null));
         LinearLayout list = screenList();
@@ -459,12 +800,15 @@ public class MainActivity extends Activity {
     }
 
     private void showSettings() {
+        clearVoiceWeatherCard(false);
+        clearVoiceNewsCard(false);
         root = baseRoot();
         Runnable back = initializing ? this::showInitializationHome : (initialized ? this::showHome : () -> beginInitialization(agentName));
         root.addView(topBar("‹", "Settings", "", back, null));
         LinearLayout list = screenList();
         list.addView(navRow("↺", "Reinitialize", "Reset memory", this::resetInitialization));
         list.addView(navRow("⌫", "Clear Session", "Keep memory", this::clearCurrentSession));
+        list.addView(navRow("🎧", "Headphones", headsetSettingsLabel(), () -> showHeadsetPrompt(false)));
         list.addView(navRow("≋", "Voice", selectedVoiceLabel, this::showVoices));
         list.addView(navRow("♬", "Sound", "76%", null));
         list.addView(navRow("♧", "Notifications", "On", null));
@@ -475,6 +819,13 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
+    private String headsetSettingsLabel() {
+        if (headsets == null || !headsets.hasBoundHeadset()) return "Not bound";
+        String label = headsets.boundLabel();
+        if (label.isEmpty()) label = "Bound";
+        return headsets.isBoundConnected() ? label : label + " · offline";
+    }
+
     private void clearCurrentSession() {
         mic.stop();
         player.stop();
@@ -482,6 +833,17 @@ public class MainActivity extends Activity {
         inputAudioOpen = false;
         pendingMicStart = false;
         pendingText = null;
+        pendingWeatherQuestion = null;
+        pendingWeatherBroadcastPrompt = null;
+        pendingRealtimeWeatherAnswer = false;
+        latestWeatherFact = "";
+        pendingNewsBroadcastPrompt = null;
+        pendingNewsQuestion = null;
+        pendingNewsToolAfterAck = false;
+        pendingRealtimeNewsAnswer = false;
+        latestNewsFact = "";
+        clearVoiceWeatherCard(false);
+        clearVoiceNewsCard(false);
         activeAssistantId = null;
         persistedMessageIds.clear();
         if (memoryStore != null && sessionId > 0) {
@@ -501,6 +863,8 @@ public class MainActivity extends Activity {
     }
 
     private void showAbout() {
+        clearVoiceWeatherCard(false);
+        clearVoiceNewsCard(false);
         root = baseRoot();
         root.addView(topBar("‹", "About Her", "", this::showSettings, null));
         LinearLayout content = new LinearLayout(this);
@@ -518,7 +882,7 @@ public class MainActivity extends Activity {
         TextView subtitle = text("Realtime Operating System", 17, 0xB8FFE0E0, 0);
         subtitle.setGravity(Gravity.CENTER);
         content.addView(subtitle);
-        TextView version = text("Doubao model · Custom cloned voice · mimo-v2.5 memory", 13, 0x88FFE0E0, 0);
+        TextView version = text("Doubao model · Custom cloned voice · c-her background", 13, 0x88FFE0E0, 0);
         version.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams v = new LinearLayout.LayoutParams(-1, -2);
         v.topMargin = dp(12);
@@ -571,6 +935,7 @@ public class MainActivity extends Activity {
         if (voiceLastTurnView != null) voiceLastTurnView.setText(line);
         if (moodVeil != null) moodVeil.setMood(moodForText(line));
         if (voiceOrbView != null) voiceOrbView.setConversationState(state);
+        if (micButton != null) micButton.setText(mic.running || inputAudioOpen ? "●" : voiceButtonText());
     }
 
     private int moodForText(String text) {
@@ -639,6 +1004,32 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void discardActiveAssistantMessage() {
+        if (activeAssistantId == null) return;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if (messages.get(i).id.equals(activeAssistantId)) {
+                messages.remove(i);
+                break;
+            }
+        }
+        activeAssistantId = null;
+        renderMessages();
+        updateVoiceHome();
+    }
+
+    private void removeAssistantReplyAfterLastUser() {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Message message = messages.get(i);
+            if ("user".equals(message.role)) break;
+            if ("assistant".equals(message.role)) {
+                messages.remove(i);
+            }
+        }
+        activeAssistantId = null;
+        renderMessages();
+        updateVoiceHome();
+    }
+
     private void maybeCompactMemory() {
         if (compactInProgress || summaryInProgress || initializing || memoryStore == null || sessionId <= 0) return;
         MemoryChunk chunk = memoryStore.unsummarizedChunk(sessionId, COMPACT_MESSAGE_THRESHOLD, COMPACT_CHAR_THRESHOLD);
@@ -673,7 +1064,7 @@ public class MainActivity extends Activity {
                     "请压缩这段新对话，不要丢掉能影响陪伴方式的细节：\n" + chunk.transcript);
             llmMessages.put(user);
 
-            body.put("model", SUBCONSCIOUS_MODEL);
+            body.put("model", BACKGROUND_MODEL);
             body.put("messages", llmMessages);
             body.put("temperature", 0.2);
             body.put("stream", false);
@@ -741,6 +1132,7 @@ public class MainActivity extends Activity {
     private void sendText(String text) {
         if (summaryInProgress) return;
         if (text == null || text.isEmpty()) return;
+        markConversationInteraction(false);
         addChatMessage("user", text);
         if (initializing) {
             initUserTurns++;
@@ -754,7 +1146,396 @@ public class MainActivity extends Activity {
         }
         activeAssistantId = null;
         renderMessages();
+        if (!initializing && handleNewsQuestion(text, false)) return;
+        if (!initializing && handleWeatherQuestion(text, false)) return;
         sendTextWithAgentLLM(text);
+    }
+
+    private boolean handleNewsQuestion(String text, boolean realtimeMode) {
+        if (!NewsSkill.isNewsQuestion(text)) {
+            Log.d(TAG, "news intent miss text=" + text);
+            return false;
+        }
+        Log.d(TAG, "news intent hit realtime=" + realtimeMode + " text=" + text);
+        latestNewsFact = "";
+        pendingRealtimeNewsAnswer = realtimeMode;
+        pendingNewsBroadcastPrompt = null;
+        pendingNewsQuestion = realtimeMode ? text : null;
+        pendingNewsToolAfterAck = false;
+        latestWeatherFact = "";
+        pendingRealtimeWeatherAnswer = false;
+        pendingWeatherBroadcastPrompt = null;
+        if (!realtimeMode) {
+            addChatMessage("assistant", "稍等，我看一下新闻热点。");
+            renderMessages();
+            runNewsTool(text, false);
+        } else {
+            startRealtimeNewsAck(text);
+        }
+        return true;
+    }
+
+    private void routeToolsInBackground(String text) {
+        if (text == null || text.trim().isEmpty()) return;
+        if (BuildConfig.AGENTLLM_API_KEY.isEmpty()) return;
+        int seq = ++toolRouteSeq;
+        JSONObject body = new JSONObject();
+        JSONArray messages = new JSONArray();
+        try {
+            JSONObject system = new JSONObject();
+            system.put("role", "system");
+            system.put("content",
+                    "你是 Doris 的后台意识模型，负责判断用户当前这句话是否需要客户端工具。\n" +
+                    "当前可用工具：daily_news（读取每日新闻热点，来源 https://agentnews.linkyun.co/）。\n" +
+                    "如果用户想查、看、听、播报新闻/热点/每日新闻热点，返回 {\"tool\":\"daily_news\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
+                    "如果只是普通聊天、评价刚才内容、追问旧回答、闲聊或不确定，返回 {\"tool\":\"none\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
+                    "只输出 JSON，不要解释。");
+            messages.put(system);
+
+            JSONObject user = new JSONObject();
+            user.put("role", "user");
+            user.put("content", text);
+            messages.put(user);
+
+            body.put("model", BACKGROUND_MODEL);
+            body.put("messages", messages);
+            body.put("temperature", 0.0);
+            body.put("stream", false);
+        } catch (JSONException error) {
+            return;
+        }
+        agents.sendSubconscious(body, new AgentApiClient.ReplyCallback() {
+            @Override public void onSuccess(String content) {
+                if (seq != toolRouteSeq) return;
+                try {
+                    JSONObject decision = parseJsonObject(content);
+                    String tool = decision.optString("tool", "none");
+                    double confidence = decision.optDouble("confidence", 0.0);
+                    Log.d(TAG, "tool route tool=" + tool + " confidence=" + confidence + " text=" + text);
+                    if ("daily_news".equals(tool) && confidence >= 0.55) {
+                        startNewsToolFromBackground(text);
+                    }
+                } catch (JSONException error) {
+                    Log.d(TAG, "tool route parse failed content=" + content);
+                }
+            }
+
+            @Override public void onError(String message) {
+                Log.d(TAG, "tool route failed " + message);
+            }
+        }, "工具路由");
+    }
+
+    private void startNewsToolFromBackground(String question) {
+        latestNewsFact = "";
+        pendingRealtimeNewsAnswer = true;
+        pendingNewsBroadcastPrompt = null;
+        pendingNewsQuestion = question;
+        pendingNewsToolAfterAck = false;
+        latestWeatherFact = "";
+        pendingRealtimeWeatherAnswer = false;
+        pendingWeatherBroadcastPrompt = null;
+        discardRealtimeAudioUntilDone = true;
+        player.stop();
+        discardActiveAssistantMessage();
+        removeAssistantReplyAfterLastUser();
+        if (realtime.isOpen()) {
+            realtime.sendEvent("input_audio.interrupt", json("reason", "background_tool_daily_news"));
+            realtime.close();
+        }
+        setState("news_tool");
+        runNewsTool(question, true);
+    }
+
+    private void startRealtimeNewsAck(String question) {
+        pendingNewsQuestion = question;
+        pendingNewsToolAfterAck = true;
+        toolRouteSeq++;
+        player.stop();
+        activeAssistantId = null;
+        setState("news_ack");
+        if (!realtime.isOpen()) {
+            realtime.connect();
+            return;
+        }
+        realtime.sendEvent("input_audio.interrupt", json("reason", "news_tool_ack"));
+        realtime.sendInputText(NewsSkill.LOOKUP_ACK_PROMPT);
+    }
+
+    private void runPendingNewsToolAfterAck() {
+        if (!pendingNewsToolAfterAck) return;
+        pendingNewsToolAfterAck = false;
+        toolRouteSeq++;
+        String question = pendingNewsQuestion == null ? "每日新闻热点" : pendingNewsQuestion;
+        realtime.close();
+        discardRealtimeAudioUntilDone = false;
+        player.stop();
+        setState("news_tool");
+        runNewsTool(question, true);
+    }
+
+    private void runNewsTool(String question, boolean realtimeMode) {
+        if (newsTool == null) return;
+        newsTool.fetchDaily(newsCallback(question, realtimeMode));
+    }
+
+    private NewsTool.CallbackResult newsCallback(String question, boolean realtimeMode) {
+        return new NewsTool.CallbackResult() {
+            @Override public void onSuccess(NewsTool.NewsResult result) {
+                String fact = result.fact(question);
+                latestNewsFact = fact;
+                addNewsCard(result);
+                if (realtimeMode) {
+                    pendingRealtimeNewsAnswer = true;
+                    queueRealtimeNewsBroadcast(NewsSkill.SUCCESS_BROADCAST_PROMPT);
+                } else {
+                    addChatMessage("assistant", result.shortAnswer());
+                    renderMessages();
+                    setState("ready");
+                }
+            }
+
+            @Override public void onError(String message) {
+                if (realtimeMode) {
+                    latestNewsFact = NewsSkill.failureFact(message);
+                    pendingRealtimeNewsAnswer = true;
+                    queueRealtimeNewsBroadcast(NewsSkill.FAILURE_BROADCAST_PROMPT);
+                } else {
+                    addChatMessage("assistant", message);
+                    renderMessages();
+                    setState("ready");
+                }
+            }
+        };
+    }
+
+    private boolean handleWeatherQuestion(String text, boolean realtimeMode) {
+        if (!WeatherSkill.isWeatherQuestion(text)) return false;
+        String city = WeatherSkill.extractCity(text);
+        latestWeatherFact = "";
+        pendingRealtimeWeatherAnswer = false;
+        pendingWeatherBroadcastPrompt = null;
+        pendingRealtimeNewsAnswer = false;
+        latestNewsFact = "";
+        if (!realtimeMode) {
+            addChatMessage("assistant", "稍等，我查一下天气。");
+            renderMessages();
+        }
+        runWeatherTool(text, city, realtimeMode);
+        return true;
+    }
+
+    private void runWeatherTool(String question, String city, boolean realtimeMode) {
+        if (weatherTool == null) return;
+        if (city != null && !city.trim().isEmpty()) {
+            weatherTool.queryCity(city.trim(), weatherCallback(question, realtimeMode));
+            return;
+        }
+        requestWeatherForCurrentLocation(question, realtimeMode);
+    }
+
+    private WeatherTool.CallbackResult weatherCallback(String question, boolean realtimeMode) {
+        return new WeatherTool.CallbackResult() {
+            @Override public void onSuccess(WeatherTool.WeatherResult result) {
+                String fact = result.fact(question);
+                latestWeatherFact = fact;
+                addWeatherCard(result);
+                if (realtimeMode) {
+                    pendingRealtimeWeatherAnswer = true;
+                    queueRealtimeWeatherBroadcast(WeatherSkill.SUCCESS_BROADCAST_PROMPT);
+                } else {
+                    addChatMessage("assistant", result.shortAnswer());
+                    renderMessages();
+                    setState("ready");
+                }
+            }
+
+            @Override public void onError(String message) {
+                if (realtimeMode) {
+                    latestWeatherFact = WeatherSkill.failureFact(message);
+                    pendingRealtimeWeatherAnswer = true;
+                    queueRealtimeWeatherBroadcast(WeatherSkill.FAILURE_BROADCAST_PROMPT);
+                } else {
+                    addChatMessage("assistant", message);
+                    renderMessages();
+                    setState("ready");
+                }
+            }
+        };
+    }
+
+    private void requestWeatherForCurrentLocation(String question, boolean realtimeMode) {
+        if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+                checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            pendingWeatherQuestion = question;
+            pendingWeatherRealtime = realtimeMode;
+            requestPermissions(new String[]{
+                    Manifest.permission.ACCESS_COARSE_LOCATION,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+            }, REQ_LOCATION);
+            return;
+        }
+        LocationManager manager = (LocationManager) getSystemService(LOCATION_SERVICE);
+        if (manager == null) {
+            weatherCallback(question, realtimeMode).onError("无法读取当前位置");
+            return;
+        }
+        try {
+            Location last = WeatherSkill.bestLastLocation(manager);
+            if (last != null) {
+                weatherTool.queryLocation(last, weatherCallback(question, realtimeMode));
+                return;
+            }
+            WeatherSkill.requestSingleLocation(manager, main,
+                    location -> weatherTool.queryLocation(location, weatherCallback(question, realtimeMode)),
+                    message -> weatherCallback(question, realtimeMode).onError(message));
+        } catch (SecurityException error) {
+            weatherCallback(question, realtimeMode).onError("没有定位权限");
+        }
+    }
+
+    private void pushRealtimeWeatherFact() {
+        if (!realtime.isOpen() || latestWeatherFact.trim().isEmpty()) return;
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("fact", trimForPrompt(latestWeatherFact, 1100));
+        } catch (JSONException ignored) { }
+        realtime.sendEvent("context.update", payload);
+    }
+
+    private void queueRealtimeWeatherBroadcast(String prompt) {
+        pendingWeatherBroadcastPrompt = prompt;
+        pushRealtimeWeatherFact();
+        if (!"speaking".equals(state) && !"thinking".equals(state)) {
+            schedulePendingWeatherBroadcast(1000);
+        }
+    }
+
+    private void schedulePendingWeatherBroadcast(long delayMs) {
+        main.postDelayed(this::sendPendingWeatherBroadcast, delayMs);
+    }
+
+    private void sendPendingWeatherBroadcast() {
+        if (pendingWeatherBroadcastPrompt == null) return;
+        if (!realtime.isOpen()) {
+            realtime.connect();
+            schedulePendingWeatherBroadcast(1400);
+            return;
+        }
+        String prompt = pendingWeatherBroadcastPrompt;
+        pendingWeatherBroadcastPrompt = null;
+        realtime.sendInputText(prompt);
+        setState("thinking");
+    }
+
+    private void pushRealtimeNewsFact() {
+        if (!realtime.isOpen() || latestNewsFact.trim().isEmpty()) return;
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("fact", trimForPrompt(latestNewsFact, 1800));
+        } catch (JSONException ignored) { }
+        realtime.sendEvent("context.update", payload);
+    }
+
+    private void queueRealtimeNewsBroadcast(String prompt) {
+        pendingNewsBroadcastPrompt = prompt;
+        toolRouteSeq++;
+        pushRealtimeNewsFact();
+        if (!"speaking".equals(state) && !"thinking".equals(state)) {
+            schedulePendingNewsBroadcast(1000);
+        }
+    }
+
+    private void schedulePendingNewsBroadcast(long delayMs) {
+        main.postDelayed(this::sendPendingNewsBroadcast, delayMs);
+    }
+
+    private void sendPendingNewsBroadcast() {
+        if (pendingNewsBroadcastPrompt == null) return;
+        Log.d(TAG, "send pending news broadcast state=" + state);
+        if ("speaking".equals(state) || "thinking".equals(state)) {
+            schedulePendingNewsBroadcast(600);
+            return;
+        }
+        if (!realtime.isOpen()) {
+            realtime.connect();
+            schedulePendingNewsBroadcast(1400);
+            return;
+        }
+        pushRealtimeNewsFact();
+        String prompt = pendingNewsBroadcastPrompt;
+        pendingNewsBroadcastPrompt = null;
+        realtime.sendInputText(prompt);
+        setState("thinking");
+    }
+
+    private void addWeatherCard(WeatherTool.WeatherResult result) {
+        messages.add(new Message(newId("weather"), result));
+        if (voiceLastTurnView != null) {
+            latestVoiceWeather = result;
+            latestVoiceNews = null;
+            scheduleVoiceWeatherCardTimeout(result);
+            showVoiceHome();
+        } else {
+            renderMessages();
+        }
+    }
+
+    private void addNewsCard(NewsTool.NewsResult result) {
+        discardActiveAssistantMessage();
+        removeAssistantReplyAfterLastUser();
+        messages.add(new Message(newId("news"), result));
+        if (voiceLastTurnView != null) {
+            latestVoiceNews = result;
+            latestVoiceWeather = null;
+            if (!pendingRealtimeNewsAnswer) scheduleVoiceNewsCardTimeout(result);
+            showVoiceHome();
+        } else {
+            renderMessages();
+        }
+    }
+
+    private void scheduleVoiceWeatherCardTimeout(WeatherTool.WeatherResult result) {
+        if (voiceWeatherTimeout != null) main.removeCallbacks(voiceWeatherTimeout);
+        voiceWeatherTimeout = () -> {
+            if (latestVoiceWeather != result) return;
+            voiceWeatherTimeout = null;
+            latestVoiceWeather = null;
+            if (voiceLastTurnView != null) showVoiceHome();
+        };
+        main.postDelayed(voiceWeatherTimeout, WeatherSkill.VOICE_CARD_TIMEOUT_MS);
+    }
+
+    private void scheduleVoiceNewsCardTimeout(NewsTool.NewsResult result) {
+        if (result == null) return;
+        if (voiceNewsTimeout != null) main.removeCallbacks(voiceNewsTimeout);
+        voiceNewsTimeout = () -> {
+            if (latestVoiceNews != result) return;
+            voiceNewsTimeout = null;
+            latestVoiceNews = null;
+            if (voiceLastTurnView != null) showVoiceHome();
+        };
+        main.postDelayed(voiceNewsTimeout, NewsSkill.VOICE_CARD_TIMEOUT_MS);
+    }
+
+    private void clearVoiceWeatherCard(boolean refreshVoice) {
+        if (voiceWeatherTimeout != null) {
+            main.removeCallbacks(voiceWeatherTimeout);
+            voiceWeatherTimeout = null;
+        }
+        if (latestVoiceWeather == null) return;
+        latestVoiceWeather = null;
+        if (refreshVoice && voiceLastTurnView != null) showVoiceHome();
+    }
+
+    private void clearVoiceNewsCard(boolean refreshVoice) {
+        if (voiceNewsTimeout != null) {
+            main.removeCallbacks(voiceNewsTimeout);
+            voiceNewsTimeout = null;
+        }
+        if (latestVoiceNews == null) return;
+        latestVoiceNews = null;
+        if (refreshVoice && voiceLastTurnView != null) showVoiceHome();
     }
 
     private void sendTextWithAgentLLM(String text) {
@@ -775,6 +1556,7 @@ public class MainActivity extends Activity {
                         setState("error");
                         return;
                     }
+                    breatheScreenForAssistantReply();
                     addChatMessage("assistant", reply);
                     renderMessages();
                     if (initializing) {
@@ -796,8 +1578,18 @@ public class MainActivity extends Activity {
 
     private void toggleMic() {
         if (summaryInProgress) return;
+        markConversationInteraction(false);
+        if ("news_tool".equals(state) || pendingNewsBroadcastPrompt != null ||
+                pendingRealtimeNewsAnswer || latestVoiceNews != null) {
+            interruptNewsPlayback();
+            return;
+        }
         if (mic.running || inputAudioOpen) {
             stopInputAudio("thinking");
+            return;
+        }
+        if (!isBoundHeadsetConnected()) {
+            showHeadsetPrompt(true);
             return;
         }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -814,9 +1606,29 @@ public class MainActivity extends Activity {
         startInputAudio();
     }
 
+    private void interruptNewsPlayback() {
+        pendingNewsBroadcastPrompt = null;
+        pendingRealtimeNewsAnswer = false;
+        pendingNewsToolAfterAck = false;
+        pendingNewsQuestion = null;
+        toolRouteSeq++;
+        if (realtime.isOpen()) {
+            realtime.sendEvent("input_audio.interrupt", json("reason", "news_interrupt"));
+            realtime.close();
+        }
+        discardRealtimeAudioUntilDone = false;
+        player.stop();
+        clearVoiceNewsCard(true);
+        setState("ready");
+        if (!realtime.isOpen()) realtime.connect();
+        scheduleContinuousListening(300);
+    }
+
     private void startInputAudio() {
         if (mic.running || inputAudioOpen) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
+        markConversationInteraction(false);
+        discardRealtimeAudioUntilDone = false;
         resetVad();
         if (audioLevelView != null) audioLevelView.setLevel(0);
         if (voiceOrbView != null) voiceOrbView.setLevel(0);
@@ -896,6 +1708,7 @@ public class MainActivity extends Activity {
     }
 
     private void enterAssistantSpeaking(int sampleRate) {
+        breatheScreenForAssistantReply();
         if (HALF_DUPLEX && (mic.running || inputAudioOpen)) {
             stopInputAudio("speaking");
         } else {
@@ -909,6 +1722,7 @@ public class MainActivity extends Activity {
     private void startContinuousListening() {
         if (!CONTINUOUS_CONVERSATION) return;
         if (mic.running || inputAudioOpen || !realtime.isOpen()) return;
+        if (!isBoundHeadsetConnected()) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
         startInputAudio();
     }
@@ -923,10 +1737,27 @@ public class MainActivity extends Activity {
     }
 
     private void onRealtimeReady() {
+        if (pendingVoiceWakeIntent) {
+            pendingVoiceWakeIntent = false;
+            if (isBoundHeadsetConnected()) {
+                toggleMic();
+                return;
+            }
+        }
         if (initPromptPending) {
             initPromptPending = false;
             realtime.sendInputText(INIT_WAKE_EVENT);
             setState("thinking");
+            return;
+        }
+        if (pendingWeatherBroadcastPrompt != null) {
+            schedulePendingWeatherBroadcast(400);
+            return;
+        }
+        if (pendingNewsToolAfterAck) {
+            realtime.sendEvent("input_audio.interrupt", json("reason", "news_tool_ack"));
+            realtime.sendInputText(NewsSkill.LOOKUP_ACK_PROMPT);
+            setState("news_ack");
             return;
         }
         if (pendingText != null) {
@@ -943,6 +1774,7 @@ public class MainActivity extends Activity {
 
     private void onAssistantDelta(String text) {
         if (activeAssistantId == null) {
+            breatheScreenForAssistantReply();
             activeAssistantId = newId("assistant");
             messages.add(new Message(activeAssistantId, "assistant", ""));
         }
@@ -954,6 +1786,80 @@ public class MainActivity extends Activity {
         }
         updateVoiceHome();
         renderMessages();
+    }
+
+    private void breatheScreenForAssistantReply() {
+        boolean interactive = isScreenInteractive();
+        markConversationInteraction(!interactive);
+        if (interactive) return;
+        Window window = getWindow();
+        if (Build.VERSION.SDK_INT >= 27) {
+            setShowWhenLocked(true);
+            setTurnScreenOn(true);
+        } else {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED |
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+        }
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        acquireReplyWakeLock();
+        animateReplyScreenBrightness();
+    }
+
+    private boolean isScreenInteractive() {
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        if (power == null) return true;
+        if (Build.VERSION.SDK_INT >= 20) return power.isInteractive();
+        return power.isScreenOn();
+    }
+
+    private void acquireReplyWakeLock() {
+        releaseReplyWakeLock();
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        if (power == null) return;
+        replyWakeLock = power.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK |
+                        PowerManager.ACQUIRE_CAUSES_WAKEUP |
+                        PowerManager.ON_AFTER_RELEASE,
+                TAG + ":assistant_reply");
+        replyWakeLock.setReferenceCounted(false);
+        replyWakeLock.acquire(6500);
+        main.postDelayed(this::releaseReplyWakeLock, 6800);
+    }
+
+    private void animateReplyScreenBrightness() {
+        restoreReplyScreenBrightness();
+        Window window = getWindow();
+        WindowManager.LayoutParams params = window.getAttributes();
+        replyOriginalBrightness = params.screenBrightness;
+        replyBrightnessAnimator = ValueAnimator.ofFloat(0.05f, 0.88f, 0.24f, 0.72f);
+        replyBrightnessAnimator.setDuration(3200);
+        replyBrightnessAnimator.setInterpolator(new AccelerateDecelerateInterpolator());
+        replyBrightnessAnimator.addUpdateListener(animation -> {
+            WindowManager.LayoutParams next = window.getAttributes();
+            next.screenBrightness = (float) animation.getAnimatedValue();
+            window.setAttributes(next);
+        });
+        replyBrightnessAnimator.start();
+        main.postDelayed(this::restoreReplyScreenBrightness, 6200);
+    }
+
+    private void restoreReplyScreenBrightness() {
+        if (replyBrightnessAnimator != null) {
+            replyBrightnessAnimator.cancel();
+            replyBrightnessAnimator = null;
+        }
+        Window window = getWindow();
+        WindowManager.LayoutParams params = window.getAttributes();
+        params.screenBrightness = replyOriginalBrightness;
+        window.setAttributes(params);
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    private void releaseReplyWakeLock() {
+        if (replyWakeLock != null && replyWakeLock.isHeld()) {
+            replyWakeLock.release();
+        }
+        replyWakeLock = null;
     }
 
     private void finishInitializationWithSummary() {
@@ -1036,12 +1942,84 @@ public class MainActivity extends Activity {
 
     private void setState(String next) {
         state = next;
-        if (stateLabel != null) stateLabel.setText(capitalize(next));
-        if (micButton != null) micButton.setText(next.equals("listening") ? "●" : "♩");
+        if (stateLabel != null) stateLabel.setText(stateLabelText());
+        if (micButton != null) micButton.setText(next.equals("listening") ? "●" : voiceButtonText());
         if (voiceOrbView != null) voiceOrbView.setConversationState(next);
         if ("ready".equals(next) || "idle".equals(next)) {
             applyContextUpdateForNextTurn(false);
         }
+    }
+
+    private String stateLabelText() {
+        if (summaryInProgress) return "Summarizing";
+        if ("news_ack".equals(state)) return "Checking news";
+        if ("news_tool".equals(state)) return "Reading agentNews";
+        if (!isBoundHeadsetConnected()) {
+            if (headsets != null && headsets.hasBoundHeadset()) return "Headset disconnected";
+            if (headsets != null && !headsets.connectedHeadsets().isEmpty()) return "Tap headset to bind";
+            return "Text only · connect headphones";
+        }
+        return capitalize(state);
+    }
+
+    private String voiceButtonText() {
+        if ("news_tool".equals(state) || pendingNewsBroadcastPrompt != null ||
+                pendingRealtimeNewsAnswer || latestVoiceNews != null) return "■";
+        return "♩";
+    }
+
+    private boolean isBoundHeadsetConnected() {
+        return headsets != null && headsets.isBoundConnected();
+    }
+
+    private void onHeadsetDevicesChanged() {
+        if (!isBoundHeadsetConnected() && (mic.running || inputAudioOpen)) {
+            stopInputAudio("text_only");
+            toastError("耳机已断开，语音已暂停。");
+        }
+        if (stateLabel != null) stateLabel.setText(stateLabelText());
+        if (micButton != null) micButton.setText(mic.running || inputAudioOpen ? "●" : voiceButtonText());
+    }
+
+    private void showHeadsetPrompt(boolean startVoiceAfterBind) {
+        if (headsetDialogShowing || isFinishing()) return;
+        if (headsets == null) return;
+        List<HeadsetBindingManager.Device> devices = headsets.connectedHeadsets();
+        headsetDialogShowing = true;
+        if (devices.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("连接耳机")
+                    .setMessage("没有检测到已连接耳机。现在只能用文字聊天；连接蓝牙或有线耳机后，再点耳机图标就可以绑定。")
+                    .setPositiveButton("打开蓝牙设置", (dialog, which) -> {
+                        headsetDialogShowing = false;
+                        startActivity(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
+                    })
+                    .setNegativeButton("文字聊天", (dialog, which) -> {
+                        headsetDialogShowing = false;
+                        showChat();
+                    })
+                    .setOnCancelListener(dialog -> headsetDialogShowing = false)
+                    .show();
+            return;
+        }
+
+        CharSequence[] labels = new CharSequence[devices.size()];
+        for (int i = 0; i < devices.size(); i++) labels[i] = devices.get(i).label;
+        new AlertDialog.Builder(this)
+                .setTitle("绑定耳机")
+                .setItems(labels, (dialog, which) -> {
+                    headsetDialogShowing = false;
+                    HeadsetBindingManager.Device device = devices.get(which);
+                    headsets.bind(device);
+                    toastError("已绑定 " + device.label + "。");
+                    if (startVoiceAfterBind) main.postDelayed(this::toggleMic, 180);
+                })
+                .setNegativeButton("继续文字聊天", (dialog, which) -> {
+                    headsetDialogShowing = false;
+                    showChat();
+                })
+                .setOnCancelListener(dialog -> headsetDialogShowing = false)
+                .show();
     }
 
     private void loadVoices() {
@@ -1110,7 +2088,7 @@ public class MainActivity extends Activity {
             user.put("role", "user");
             user.put("content",
                     "Agent 名字：" + agentName + "\n" +
-                    "请使用 mimo-v2.5 总结以下初始化对话，生成 user.md 和 Agent.md。要求：\n" +
+                    "请使用 c-her 总结以下初始化对话，生成 user.md 和 Agent.md。要求：\n" +
                     "1. user_name 是用户希望被称呼的名字。\n" +
                     "2. user_md 包含用户姓名/称呼、用户希望和 AI 的关系、用户的故事、沟通偏好、重要边界或目标。\n" +
                     "3. agent_md 包含 Agent 的名字、默认语气、与该用户相处的关系定位、后续对话策略。\n" +
@@ -1119,7 +2097,7 @@ public class MainActivity extends Activity {
                     transcript);
             llmMessages.put(user);
 
-            body.put("model", SUBCONSCIOUS_MODEL);
+            body.put("model", BACKGROUND_MODEL);
             body.put("messages", llmMessages);
             body.put("temperature", 0);
             body.put("stream", false);
@@ -1206,6 +2184,8 @@ public class MainActivity extends Activity {
         String recent = recentDialogueForPrompt();
         return trimForPrompt("你叫 " + SYSTEM_AGENT_NAME + "。\n" +
                 INSTRUCTIONS + "\n" +
+                WeatherSkill.promptBlock(latestWeatherFact, pendingRealtimeWeatherAnswer) +
+                NewsSkill.promptBlock(latestNewsFact, pendingRealtimeNewsAnswer) +
                 "当前动态语气调整：" + dynamicTone + "\n" +
                 "以下是本地 user.md 记忆。你需要把它作为长期用户画像和对话偏好使用，但不要主动朗读或暴露文件内容。\n\n" +
                 userMemory + "\n\n" +
@@ -1301,11 +2281,18 @@ public class MainActivity extends Activity {
             onRealtimeReady();
         } else if ("asr.final".equals(type) && payload != null) {
             String text = payload.optString("text", "").trim();
+            if (isHiddenSystemEvent(text)) {
+                ignoreNextInitTrigger = false;
+                return;
+            }
             if (initializing && isHiddenInitTrigger(text)) {
                 ignoreNextInitTrigger = false;
                 return;
             }
-            if (!text.isEmpty()) addChatMessage("user", text);
+            if (!text.isEmpty()) {
+                markConversationInteraction(false);
+                addChatMessage("user", text);
+            }
             if (initializing && !text.isEmpty()) {
                 initUserTurns++;
                 updateInitProgress();
@@ -1320,6 +2307,9 @@ public class MainActivity extends Activity {
             }
             activeAssistantId = null;
             renderMessages();
+            if (!initializing && handleNewsQuestion(text, true)) return;
+            if (!initializing && handleWeatherQuestion(text, true)) return;
+            if (!initializing) routeToolsInBackground(text);
         } else if ("assistant.state".equals(type) && payload != null) {
             String providerState = payload.optString("state", "ready");
             if ("thinking".equals(providerState)) setState("thinking");
@@ -1328,10 +2318,36 @@ public class MainActivity extends Activity {
         } else if ("assistant.text.delta".equals(type) && payload != null) {
             onAssistantDelta(payload.optString("text", ""));
         } else if ("output_audio.start".equals(type) && payload != null) {
-            enterAssistantSpeaking(payload.optInt("sample_rate", 24000));
+            if (!discardRealtimeAudioUntilDone) {
+                enterAssistantSpeaking(payload.optInt("sample_rate", 24000));
+            }
         } else if ("output_audio.done".equals(type)) {
+            discardRealtimeAudioUntilDone = false;
             persistActiveAssistantMessage();
             activeAssistantId = null;
+            if (pendingNewsToolAfterAck) {
+                runPendingNewsToolAfterAck();
+                return;
+            }
+            if (pendingWeatherBroadcastPrompt != null) {
+                setState("ready");
+                schedulePendingWeatherBroadcast(900);
+                return;
+            }
+            if (pendingNewsBroadcastPrompt != null) {
+                setState("ready");
+                schedulePendingNewsBroadcast(250);
+                return;
+            }
+            pendingRealtimeWeatherAnswer = false;
+            if (pendingRealtimeNewsAnswer) {
+                pendingRealtimeNewsAnswer = false;
+                scheduleVoiceNewsCardTimeout(latestVoiceNews);
+                setState("ready");
+                scheduleContinuousListening(650);
+                return;
+            }
+            pendingRealtimeNewsAnswer = false;
             if (initializing && initSummaryPending) {
                 finishInitializationWithSummary();
                 return;
@@ -1339,9 +2355,33 @@ public class MainActivity extends Activity {
             setState("ready");
             scheduleContinuousListening(650);
         } else if ("output_audio.stop".equals(type)) {
+            discardRealtimeAudioUntilDone = false;
             player.stop();
             persistActiveAssistantMessage();
             activeAssistantId = null;
+            if (pendingNewsToolAfterAck) {
+                runPendingNewsToolAfterAck();
+                return;
+            }
+            if (pendingWeatherBroadcastPrompt != null) {
+                setState(mic.running ? "listening" : "ready");
+                schedulePendingWeatherBroadcast(900);
+                return;
+            }
+            if (pendingNewsBroadcastPrompt != null) {
+                setState(mic.running ? "listening" : "ready");
+                schedulePendingNewsBroadcast(250);
+                return;
+            }
+            pendingRealtimeWeatherAnswer = false;
+            if (pendingRealtimeNewsAnswer) {
+                pendingRealtimeNewsAnswer = false;
+                scheduleVoiceNewsCardTimeout(latestVoiceNews);
+                setState(mic.running ? "listening" : "ready");
+                if (!mic.running && !inputAudioOpen) scheduleContinuousListening(180);
+                return;
+            }
+            pendingRealtimeNewsAnswer = false;
             setState(mic.running ? "listening" : "ready");
             if (!mic.running && !inputAudioOpen) scheduleContinuousListening(180);
         } else if ("memory.snapshot".equals(type) && payload != null) {
@@ -1360,6 +2400,12 @@ public class MainActivity extends Activity {
 
     private boolean isHiddenInitTrigger(String text) {
         return text != null && (text.contains("系统事件") || text.contains("主动问候") || text.contains("Doris 主动"));
+    }
+
+    private boolean isHiddenSystemEvent(String text) {
+        if (text == null) return false;
+        String value = text.trim();
+        return value.startsWith("【系统事件】") || value.startsWith("[系统事件]");
     }
 
     private void retryRealtime(String reason) {
@@ -1403,6 +2449,7 @@ public class MainActivity extends Activity {
         }
         String text = snapshot.toString().trim();
         if (text.isEmpty()) return;
+        if (WeatherSkill.isTransientMemory(text)) return;
         memoryStore.insertMemory(sessionId, "agentvoice_snapshot", text, 0, 0);
         conversationMemory = memoryStore.relevantMemory(lastUserUtterance);
     }

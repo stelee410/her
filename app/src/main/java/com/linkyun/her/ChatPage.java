@@ -81,7 +81,15 @@ final class ChatPage {
         if (messageList == null) return;
         messageList.removeAllViews();
         for (Message message : messages) {
-            messageList.addView(bubble(activity, ui, message));
+            View row;
+            if (message.weather != null) {
+                row = WeatherCard.chat(activity, ui, message);
+            } else if (message.news != null) {
+                row = NewsCard.chat(activity, ui, message);
+            } else {
+                row = bubble(activity, ui, message);
+            }
+            messageList.addView(row);
             Space gap = new Space(activity);
             messageList.addView(gap, new LinearLayout.LayoutParams(1, ui.dp(18)));
         }

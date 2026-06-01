@@ -117,6 +117,7 @@ final class MemoryStore extends SQLiteOpenHelper {
                         new String[]{match});
                 try {
                     while (cursor.moveToNext()) {
+                        if (isTransientMemory(cursor.getString(1))) continue;
                         builder.append("- [").append(cursor.getString(0)).append("] ")
                                 .append(cursor.getString(1)).append('\n');
                     }
@@ -129,6 +130,7 @@ final class MemoryStore extends SQLiteOpenHelper {
                 "SELECT kind, content FROM memories ORDER BY id DESC LIMIT 6", null);
         try {
             while (recent.moveToNext()) {
+                if (isTransientMemory(recent.getString(1))) continue;
                 builder.append("- [").append(recent.getString(0)).append("] ")
                         .append(recent.getString(1)).append('\n');
             }
@@ -174,5 +176,9 @@ final class MemoryStore extends SQLiteOpenHelper {
             builder.append(part);
         }
         return builder.toString();
+    }
+
+    private boolean isTransientMemory(String content) {
+        return WeatherSkill.isTransientMemory(content) || NewsSkill.isTransientMemory(content);
     }
 }

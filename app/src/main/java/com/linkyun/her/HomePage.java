@@ -1,13 +1,61 @@
 package com.linkyun.her;
 
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.view.Gravity;
+import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 final class HomePage {
-    static Views render(MainActivity activity, HerUi ui, Model model, Callbacks callbacks) {
+    static Views renderLanding(MainActivity activity, HerUi ui, LandingModel model, Callbacks callbacks) {
+        HerUi.Root rootState = ui.baseRoot(model.mood);
+        FrameLayout root = rootState.frame;
+        LinearLayout top = ui.topBar("☰", "", "Aa", callbacks::onSettings, callbacks::onChat);
+        root.addView(top);
+
+        LinearLayout center = new LinearLayout(activity);
+        center.setOrientation(LinearLayout.VERTICAL);
+        center.setGravity(Gravity.CENTER);
+        center.setPadding(ui.dp(30), 0, ui.dp(30), ui.dp(74));
+        root.addView(center, ui.frame(-1, -1));
+
+        HerMarkView mark = new HerMarkView(activity);
+        mark.setOnClickListener(v -> callbacks.onVoiceHome());
+        center.addView(mark, new LinearLayout.LayoutParams(ui.dp(174), ui.dp(174)));
+
+        TextView greeting = ui.text("Hello, " + model.userName + "\nI'm", 32, Color.WHITE, 700);
+        greeting.setGravity(Gravity.CENTER);
+        greeting.setLineSpacing(ui.dp(8), 1.0f);
+        LinearLayout.LayoutParams greetingParams = new LinearLayout.LayoutParams(-1, -2);
+        greetingParams.topMargin = ui.dp(38);
+        center.addView(greeting, greetingParams);
+
+        TextView handwrittenNameView = ui.text("", 42, Color.WHITE, 0);
+        handwrittenNameView.setGravity(Gravity.CENTER);
+        handwrittenNameView.setIncludeFontPadding(false);
+        handwrittenNameView.setTypeface(Typeface.create("casual", Typeface.NORMAL));
+        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(-1, -2);
+        nameParams.topMargin = ui.dp(16);
+        center.addView(handwrittenNameView, nameParams);
+
+        TextView homeTimeView = ui.text("", 42, Color.WHITE, 0);
+        homeTimeView.setGravity(Gravity.CENTER);
+        homeTimeView.setVisibility(TextView.GONE);
+
+        TextView voiceEntry = ui.text("^", 32, Color.WHITE, 700);
+        voiceEntry.setGravity(Gravity.CENTER);
+        voiceEntry.setOnClickListener(v -> callbacks.onVoiceHome());
+        FrameLayout.LayoutParams entryParams = ui.frame(ui.dp(78), ui.dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        entryParams.bottomMargin = ui.dp(24);
+        root.addView(voiceEntry, entryParams);
+
+        top.bringToFront();
+        return new Views(root, rootState.moodVeil, null, null, null, null, null, homeTimeView, handwrittenNameView);
+    }
+
+    static Views renderVoice(MainActivity activity, HerUi ui, VoiceModel model, Callbacks callbacks) {
         HerUi.Root rootState = ui.baseRoot(model.mood);
         FrameLayout root = rootState.frame;
         LinearLayout top = ui.topBar("☰", "", "Aa", callbacks::onSettings, callbacks::onChat);
@@ -49,25 +97,58 @@ final class HomePage {
         micParams.bottomMargin = ui.dp(18);
         root.addView(micButton, micParams);
 
+        if (model.weather != null) {
+            View weatherCard = WeatherCard.voice(activity, ui, model.weather);
+            FrameLayout.LayoutParams weatherParams = ui.frame(-1, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            weatherParams.leftMargin = ui.dp(18);
+            weatherParams.rightMargin = ui.dp(18);
+            weatherParams.topMargin = ui.dp(84);
+            root.addView(weatherCard, weatherParams);
+        } else if (model.news != null) {
+            View newsCard = NewsCard.voice(activity, ui, model.news);
+            FrameLayout.LayoutParams newsParams = ui.frame(-1, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            newsParams.leftMargin = ui.dp(18);
+            newsParams.rightMargin = ui.dp(18);
+            newsParams.topMargin = ui.dp(84);
+            root.addView(newsCard, newsParams);
+        }
+
         top.bringToFront();
-        return new Views(root, rootState.moodVeil, voiceOrbView, voiceLastTurnView, stateLabel, audioLevelView, micButton);
+        return new Views(root, rootState.moodVeil, voiceOrbView, voiceLastTurnView, stateLabel, audioLevelView, micButton, null, null);
     }
 
     interface Callbacks {
         void onSettings();
         void onChat();
+        void onVoiceHome();
         void onToggleMic();
     }
 
-    static final class Model {
+    static final class LandingModel {
+        final String userName;
+        final String agentName;
+        final int mood;
+
+        LandingModel(String userName, String agentName, int mood) {
+            this.userName = userName;
+            this.agentName = agentName;
+            this.mood = mood;
+        }
+    }
+
+    static final class VoiceModel {
         final String lastLine;
         final String stateLabel;
         final int mood;
+        final WeatherTool.WeatherResult weather;
+        final NewsTool.NewsResult news;
 
-        Model(String lastLine, String stateLabel, int mood) {
+        VoiceModel(String lastLine, String stateLabel, int mood, WeatherTool.WeatherResult weather, NewsTool.NewsResult news) {
             this.lastLine = lastLine;
             this.stateLabel = stateLabel;
             this.mood = mood;
+            this.weather = weather;
+            this.news = news;
         }
     }
 
@@ -79,9 +160,12 @@ final class HomePage {
         final TextView stateLabel;
         final AudioLevelView audioLevelView;
         final TextView micButton;
+        final TextView homeTimeView;
+        final TextView handwrittenNameView;
 
         Views(FrameLayout root, MoodVeil moodVeil, VoiceOrbView voiceOrbView, TextView voiceLastTurnView,
-                TextView stateLabel, AudioLevelView audioLevelView, TextView micButton) {
+                TextView stateLabel, AudioLevelView audioLevelView, TextView micButton,
+                TextView homeTimeView, TextView handwrittenNameView) {
             this.root = root;
             this.moodVeil = moodVeil;
             this.voiceOrbView = voiceOrbView;
@@ -89,6 +173,8 @@ final class HomePage {
             this.stateLabel = stateLabel;
             this.audioLevelView = audioLevelView;
             this.micButton = micButton;
+            this.homeTimeView = homeTimeView;
+            this.handwrittenNameView = handwrittenNameView;
         }
     }
 }
