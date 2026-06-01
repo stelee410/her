@@ -2,48 +2,22 @@ package com.linkyun.her;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.ContentValues;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.database.Cursor;
-import android.database.sqlite.SQLiteDatabase;
-import android.database.sqlite.SQLiteOpenHelper;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.LinearGradient;
-import android.graphics.Paint;
-import android.graphics.Path;
-import android.graphics.RectF;
-import android.graphics.Shader;
-import android.media.AudioAttributes;
-import android.media.AudioFormat;
-import android.media.AudioRecord;
-import android.media.AudioTrack;
-import android.media.MediaRecorder;
-import android.media.audiofx.AcousticEchoCanceler;
-import android.media.audiofx.AutomaticGainControl;
-import android.media.audiofx.NoiseSuppressor;
 import android.os.Build;
 import android.os.SystemClock;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.InputType;
-import android.graphics.Typeface;
-import android.util.Log;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
 import android.view.Window;
-import android.view.WindowInsets;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Space;
 import android.widget.TextView;
 
 import org.json.JSONArray;
@@ -54,9 +28,6 @@ import java.io.IOException;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
-import java.io.UnsupportedEncodingException;
-import java.net.URLEncoder;
-import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -66,16 +37,7 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
-import okhttp3.Call;
-import okhttp3.Callback;
-import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
-import okhttp3.RequestBody;
-import okhttp3.WebSocket;
-import okhttp3.WebSocketListener;
-import okio.ByteString;
 
 public class MainActivity extends Activity {
     private static final String TAG = "HerRealtime";
@@ -95,7 +57,6 @@ public class MainActivity extends Activity {
     private static final String SYSTEM_AGENT_NAME = "Doris";
     private static final String TEXT_CHAT_MODEL = "c-her";
     private static final String SUBCONSCIOUS_MODEL = "mimo-v2.5";
-    private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final String DEFAULT_VOICE = BuildConfig.AGENTVOICE_CLONED_VOICE;
     private static final String INSTRUCTIONS =
             "你是一个像 Her 里那样亲密、聪明、有温度的中文陪伴式语音助手。\n" +
@@ -114,7 +75,36 @@ public class MainActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Message> messages = new ArrayList<>();
     private final List<Voice> voices = new ArrayList<>();
-    private final RealtimeClient realtime = new RealtimeClient();
+    private final RealtimeClient realtime = new RealtimeClient(TAG, new RealtimeClient.Host() {
+        @Override public Handler mainHandler() {
+            return main;
+        }
+
+        @Override public JSONObject buildRealtimeSessionPayload() {
+            return sessionPayload();
+        }
+
+        @Override public void onRealtimeConnecting() {
+            setState("connecting");
+        }
+
+        @Override public void onRealtimeEvent(String type, JSONObject payload) {
+            handleEvent(type, payload);
+        }
+
+        @Override public void onRealtimeAudio(byte[] bytes) {
+            player.play(bytes);
+        }
+
+        @Override public void onRealtimeError(String message) {
+            setState("error");
+            toastError(message);
+        }
+
+        @Override public void onRealtimeClosed() {
+            setState(summaryInProgress ? "summarizing" : "idle");
+        }
+    });
     private final OkHttpClient llmHttp = new OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
@@ -122,8 +112,10 @@ public class MainActivity extends Activity {
             .callTimeout(75, TimeUnit.SECONDS)
             .build();
     private final MicStreamer mic = new MicStreamer();
-    private final PcmPlayer player = new PcmPlayer();
+    private final PcmPlayer player = new PcmPlayer(TAG);
     private MemoryStore memoryStore;
+    private AgentApiClient agents;
+    private HerUi ui;
 
     private FrameLayout root;
     private long sessionId = -1;
@@ -143,7 +135,6 @@ public class MainActivity extends Activity {
     private boolean initSummaryPending = false;
     private boolean summaryInProgress = false;
     private boolean ignoreNextInitTrigger = false;
-    private boolean initContextUpdatePending = false;
     private int realtimeRetryCount = 0;
     private int initUserTurns = 0;
     private boolean pendingMicStart = false;
@@ -183,6 +174,8 @@ public class MainActivity extends Activity {
         startHerForegroundService(false);
         requestNotificationPermissionIfNeeded();
 
+        ui = new HerUi(this);
+        agents = new AgentApiClient(llmHttp, main);
         voices.add(new Voice(DEFAULT_VOICE, "Doris Clone", "female"));
         voices.add(new Voice("zh_female_roumeinvyou_emo_v2_mars_bigtts", "柔美女友（多情感）", "female"));
         voices.add(new Voice("zh_female_gaolengyujie_emo_v2_mars_bigtts", "高冷御姐（多情感）", "female"));
@@ -249,53 +242,25 @@ public class MainActivity extends Activity {
     }
 
     private void showHome() {
-        root = baseRoot();
         messageList = null;
         messageScroll = null;
         composer = null;
         homeTimeView = null;
         if (homeClockTicker != null) main.removeCallbacks(homeClockTicker);
-        LinearLayout top = topBar("☰", "", "Aa", this::showSettings, this::showChat);
-        root.addView(top);
-
-        LinearLayout center = new LinearLayout(this);
-        center.setOrientation(LinearLayout.VERTICAL);
-        center.setGravity(Gravity.CENTER);
-        center.setPadding(dp(30), 0, dp(30), dp(86));
-        root.addView(center, frame(-1, -1));
-
-        voiceOrbView = new VoiceOrbView(this);
-        voiceOrbView.setOnClickListener(v -> toggleMic());
-        LinearLayout.LayoutParams markParams = new LinearLayout.LayoutParams(dp(178), dp(178));
-        center.addView(voiceOrbView, markParams);
-
-        voiceLastTurnView = text(lastConversationLine(), 22, Color.WHITE, 0);
-        voiceLastTurnView.setGravity(Gravity.CENTER);
-        voiceLastTurnView.setLineSpacing(dp(4), 1.0f);
-        voiceLastTurnView.setPadding(dp(8), dp(34), dp(8), 0);
-        LinearLayout.LayoutParams lastParams = new LinearLayout.LayoutParams(-1, -2);
-        lastParams.topMargin = dp(6);
-        center.addView(voiceLastTurnView, lastParams);
-
-        stateLabel = text(capitalize(state), 12, 0xA8FFE0E0, 0);
-        stateLabel.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams stateParams = new LinearLayout.LayoutParams(-1, -2);
-        stateParams.topMargin = dp(16);
-        center.addView(stateLabel, stateParams);
-
-        audioLevelView = new AudioLevelView(this);
-        FrameLayout.LayoutParams levelParams = frame(dp(190), dp(12), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        levelParams.bottomMargin = dp(94);
-        root.addView(audioLevelView, levelParams);
-
-        micButton = text("♩", 36, 0xFFFF6377, 0);
-        micButton.setGravity(Gravity.CENTER);
-        micButton.setOnClickListener(v -> toggleMic());
-        FrameLayout.LayoutParams micParams = frame(dp(78), dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        micParams.bottomMargin = dp(18);
-        root.addView(micButton, micParams);
-
-        top.bringToFront();
+        HomePage.Views views = HomePage.render(this, ui,
+                new HomePage.Model(lastConversationLine(), capitalize(state), moodForText(lastConversationLine())),
+                new HomePage.Callbacks() {
+                    @Override public void onSettings() { showSettings(); }
+                    @Override public void onChat() { showChat(); }
+                    @Override public void onToggleMic() { toggleMic(); }
+                });
+        root = views.root;
+        moodVeil = views.moodVeil;
+        voiceOrbView = views.voiceOrbView;
+        voiceLastTurnView = views.voiceLastTurnView;
+        stateLabel = views.stateLabel;
+        audioLevelView = views.audioLevelView;
+        micButton = views.micButton;
         setContentView(root);
         updateVoiceHome();
         if (!realtime.isOpen()) realtime.connect();
@@ -371,7 +336,6 @@ public class MainActivity extends Activity {
         initSummaryPending = false;
         summaryInProgress = false;
         ignoreNextInitTrigger = false;
-        initContextUpdatePending = false;
         realtimeRetryCount = 0;
         initUserTurns = 0;
         inputAudioOpen = false;
@@ -384,56 +348,14 @@ public class MainActivity extends Activity {
     }
 
     private void showInitialize() {
-        root = baseRoot();
         homeTimeView = null;
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setGravity(Gravity.CENTER);
-        content.setPadding(dp(34), 0, dp(34), 0);
-        root.addView(content, frame(-1, -1));
-
-        InitOrbView mark = new InitOrbView(this);
-        content.addView(mark, new LinearLayout.LayoutParams(dp(130), dp(130)));
-
-        TextView title = text("Create your Agent", 28, Color.WHITE, 0);
-        title.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, -2);
-        titleParams.topMargin = dp(34);
-        content.addView(title, titleParams);
-
-        TextView subtitle = text("先给她一个名字。接下来她会主动介绍自己，然后了解你的称呼、你希望彼此是什么关系，以及你的生活习惯。", 15, 0xB8FFE0E0, 0);
-        subtitle.setGravity(Gravity.CENTER);
-        subtitle.setLineSpacing(dp(3), 1.0f);
-        LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(-1, -2);
-        subtitleParams.topMargin = dp(14);
-        content.addView(subtitle, subtitleParams);
-
-        EditText nameInput = new EditText(this);
-        nameInput.setText(agentName);
-        nameInput.setHint("Agent name");
-        nameInput.setHintTextColor(0x80FFE0E0);
-        nameInput.setTextColor(Color.WHITE);
-        nameInput.setTextSize(21);
-        nameInput.setSingleLine(true);
-        nameInput.setGravity(Gravity.CENTER);
-        nameInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
-        nameInput.setBackgroundColor(0x22FFFFFF);
-        LinearLayout.LayoutParams inputParams = new LinearLayout.LayoutParams(-1, dp(58));
-        inputParams.topMargin = dp(28);
-        content.addView(nameInput, inputParams);
-
-        TextView start = text("Initialize", 19, Color.WHITE, 600);
-        start.setGravity(Gravity.CENTER);
-        start.setBackground(new BubbleDrawable(true));
-        start.setOnClickListener(v -> {
-            String value = nameInput.getText().toString().trim();
+        InitializationPage.Views views = InitializationPage.renderSetup(this, ui, agentName, this::showSettings, name -> {
+            String value = name.trim();
             if (value.isEmpty()) value = SYSTEM_AGENT_NAME;
             beginInitialization(value);
         });
-        LinearLayout.LayoutParams startParams = new LinearLayout.LayoutParams(-1, dp(58));
-        startParams.topMargin = dp(18);
-        content.addView(start, startParams);
-
+        root = views.root;
+        moodVeil = views.moodVeil;
         setContentView(root);
     }
 
@@ -450,7 +372,6 @@ public class MainActivity extends Activity {
         initSummaryPending = false;
         summaryInProgress = false;
         ignoreNextInitTrigger = true;
-        initContextUpdatePending = false;
         realtimeRetryCount = 0;
         initUserTurns = 0;
         activeAssistantId = null;
@@ -461,121 +382,48 @@ public class MainActivity extends Activity {
     }
 
     private void showInitializationHome() {
-        root = baseRoot();
         messageList = null;
         messageScroll = null;
         composer = null;
         homeTimeView = null;
-
-        root.addView(topBar("☰", "", "", this::showSettings, null));
-
-        LinearLayout center = new LinearLayout(this);
-        center.setOrientation(LinearLayout.VERTICAL);
-        center.setGravity(Gravity.CENTER);
-        center.setPadding(dp(28), 0, dp(28), dp(96));
-        root.addView(center, frame(-1, -1));
-
-        InitOrbView mark = new InitOrbView(this);
-        center.addView(mark, new LinearLayout.LayoutParams(dp(154), dp(154)));
-
-        initProgressView = text(initProgressText(), 14, 0xCCFFE0E0, 0);
-        initProgressView.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(-1, -2);
-        progressParams.topMargin = dp(30);
-        center.addView(initProgressView, progressParams);
-
-        initLastTurnView = text(lastInitializationLine(), 21, Color.WHITE, 0);
-        initLastTurnView.setGravity(Gravity.CENTER);
-        initLastTurnView.setLineSpacing(dp(4), 1.0f);
-        initLastTurnView.setPadding(dp(14), dp(12), dp(14), dp(12));
-        LinearLayout.LayoutParams lastParams = new LinearLayout.LayoutParams(-1, -2);
-        lastParams.topMargin = dp(22);
-        center.addView(initLastTurnView, lastParams);
-
-        stateLabel = text(capitalize(state), 12, 0x99FFE0E0, 0);
-        stateLabel.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams stateParams = new LinearLayout.LayoutParams(-1, -2);
-        stateParams.topMargin = dp(8);
-        center.addView(stateLabel, stateParams);
-
-        audioLevelView = new AudioLevelView(this);
-        FrameLayout.LayoutParams levelParams = frame(dp(190), dp(12), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        levelParams.bottomMargin = dp(100);
-        root.addView(audioLevelView, levelParams);
-
-        micButton = text("♩", 34, 0xFFFF6377, 0);
-        micButton.setGravity(Gravity.CENTER);
-        micButton.setOnClickListener(v -> toggleMic());
-        FrameLayout.LayoutParams micParams = frame(dp(78), dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        micParams.bottomMargin = dp(22);
-        root.addView(micButton, micParams);
-
+        InitializationPage.Views views = InitializationPage.renderHome(this, ui,
+                new InitializationPage.Model(initProgressText(), lastInitializationLine(), capitalize(state), moodForText(lastInitializationLine())),
+                new InitializationPage.Callbacks() {
+                    @Override public void onSettings() { showSettings(); }
+                    @Override public void onToggleMic() { toggleMic(); }
+                    @Override public boolean isSummarizing() { return summaryInProgress; }
+                });
+        root = views.root;
+        moodVeil = views.moodVeil;
+        initProgressView = views.initProgressView;
+        initLastTurnView = views.initLastTurnView;
+        stateLabel = views.stateLabel;
+        audioLevelView = views.audioLevelView;
+        micButton = views.micButton;
         setContentView(root);
     }
 
     private void showChat() {
         if (mic.running || inputAudioOpen) stopInputAudio("ready");
-        root = baseRoot();
         homeTimeView = null;
         voiceLastTurnView = null;
         voiceOrbView = null;
         audioLevelView = null;
         micButton = null;
-        LinearLayout top = topBar("‹", agentName, "♩", initialized ? this::showHome : this::showInitialize, initialized ? this::showHome : this::showSettings);
-        root.addView(top);
-
-        stateLabel = text(capitalize(state), 11, 0x99FFE0E0, 0);
-        stateLabel.setGravity(Gravity.CENTER);
-        FrameLayout.LayoutParams stateParams = frame(-1, dp(22), Gravity.TOP);
-        stateParams.topMargin = dp(54);
-        root.addView(stateLabel, stateParams);
-
-        if (initializing) {
-            initProgressView = text(initProgressText(), 13, 0xCCFFE0E0, 0);
-            initProgressView.setGravity(Gravity.CENTER);
-            FrameLayout.LayoutParams initParams = frame(-1, dp(26), Gravity.TOP);
-            initParams.topMargin = dp(76);
-            root.addView(initProgressView, initParams);
-        } else {
-            initProgressView = null;
-        }
-
-        messageScroll = new ScrollView(this);
-        messageScroll.setFillViewport(true);
-        messageScroll.setPadding(0, initializing ? dp(108) : dp(80), 0, dp(98));
-        messageList = new LinearLayout(this);
-        messageList.setOrientation(LinearLayout.VERTICAL);
-        messageList.setPadding(dp(26), dp(10), dp(26), dp(28));
-        messageScroll.addView(messageList, new ScrollView.LayoutParams(-1, -2));
-        root.addView(messageScroll, frame(-1, -1));
-        renderMessages();
-
-        LinearLayout input = new LinearLayout(this);
-        input.setGravity(Gravity.CENTER_VERTICAL);
-        input.setPadding(dp(22), dp(12), dp(18), dp(12));
-        input.setBackgroundColor(0x88523B48);
-
-        composer = new EditText(this);
-        composer.setHint("Type a message...");
-        composer.setHintTextColor(0x80FFE0E0);
-        composer.setTextColor(Color.WHITE);
-        composer.setTextSize(18);
-        composer.setSingleLine(true);
-        composer.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        composer.setBackgroundColor(Color.TRANSPARENT);
-        input.addView(composer, new LinearLayout.LayoutParams(0, dp(56), 1));
-
-        TextView send = text("➤", 26, 0xFFFF6377, 0);
-        send.setGravity(Gravity.CENTER);
-        send.setOnClickListener(v -> {
-            String value = composer.getText().toString().trim();
-            composer.setText("");
-            sendText(value);
-        });
-        input.addView(send, new LinearLayout.LayoutParams(dp(50), dp(56)));
-
-        root.addView(input, frame(-1, dp(92), Gravity.BOTTOM));
-        top.bringToFront();
+        ChatPage.Views views = ChatPage.render(this, ui,
+                new ChatPage.Model(agentName, capitalize(state), initializing, initProgressText(), moodForText(lastConversationLine()), messages),
+                new ChatPage.Callbacks() {
+                    @Override public void onBack() { if (initialized) showHome(); else showInitialize(); }
+                    @Override public void onVoiceHome() { if (initialized) showHome(); else showSettings(); }
+                    @Override public void onSend(String text) { sendText(text); }
+                });
+        root = views.root;
+        moodVeil = views.moodVeil;
+        messageList = views.messageList;
+        messageScroll = views.messageScroll;
+        composer = views.composer;
+        stateLabel = views.stateLabel;
+        initProgressView = views.initProgressView;
         setContentView(root);
     }
 
@@ -679,83 +527,32 @@ public class MainActivity extends Activity {
     }
 
     private FrameLayout baseRoot() {
-        FrameLayout frame = new FrameLayout(this);
-        ImageView bg = new ImageView(this);
-        bg.setImageResource(getResources().getIdentifier("her_background", "drawable", getPackageName()));
-        bg.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        frame.addView(bg, frame(-1, -1));
-        moodVeil = new MoodVeil(this);
-        moodVeil.setMood(moodForText(lastConversationLine()));
-        frame.addView(moodVeil, frame(-1, -1));
-        return frame;
+        HerUi.Root rootState = ui.baseRoot(moodForText(lastConversationLine()));
+        moodVeil = rootState.moodVeil;
+        return rootState.frame;
     }
 
     private LinearLayout topBar(String left, String title, String right, Runnable leftAction, Runnable rightAction) {
-        LinearLayout bar = new LinearLayout(this);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(22), dp(20), dp(22), 0);
-        TextView l = icon(left);
-        l.setOnClickListener(v -> {
-            if (leftAction != null) leftAction.run();
-        });
-        bar.addView(l, new LinearLayout.LayoutParams(dp(54), dp(58)));
-        TextView middle = text(title, 18, Color.WHITE, 500);
-        middle.setGravity(Gravity.CENTER);
-        bar.addView(middle, new LinearLayout.LayoutParams(0, dp(58), 1));
-        TextView r = icon(right);
-        r.setOnClickListener(v -> {
-            if (rightAction != null) rightAction.run();
-        });
-        bar.addView(r, new LinearLayout.LayoutParams(dp(54), dp(58)));
-        FrameLayout.LayoutParams params = frame(-1, dp(86), Gravity.TOP);
-        bar.setLayoutParams(params);
-        return bar;
+        return ui.topBar(left, title, right, leftAction, rightAction);
     }
 
     private LinearLayout screenList() {
-        LinearLayout list = new LinearLayout(this);
-        list.setOrientation(LinearLayout.VERTICAL);
-        list.setPadding(dp(28), dp(92), dp(28), dp(28));
-        root.addView(list, frame(-1, -1));
-        return list;
+        return ui.screenList(root);
     }
 
     private LinearLayout row() {
-        LinearLayout row = new LinearLayout(this);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(8), 0, dp(8));
-        row.setMinimumHeight(dp(72));
-        row.setBackground(new BottomLineDrawable());
-        return row;
+        return ui.row();
     }
 
     private View navRow(String symbol, String label, String value, Runnable action) {
-        LinearLayout row = row();
-        TextView s = text(symbol, 23, 0xCCFFFFFF, 0);
-        s.setGravity(Gravity.CENTER);
-        row.addView(s, new LinearLayout.LayoutParams(dp(48), -1));
-        row.addView(text(label, 16, Color.WHITE, 0), new LinearLayout.LayoutParams(0, -1, 1));
-        TextView val = text(value, 13, 0x99FFE0E0, 0);
-        val.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
-        row.addView(val, new LinearLayout.LayoutParams(dp(150), -1));
-        TextView chevron = text(action == null ? "" : "›", 28, 0xCCFFFFFF, 0);
-        chevron.setGravity(Gravity.CENTER);
-        row.addView(chevron, new LinearLayout.LayoutParams(dp(28), -1));
-        if (action != null) row.setOnClickListener(v -> action.run());
-        return row;
+        return ui.navRow(symbol, label, value, action);
     }
 
     private void renderMessages() {
         updateInitializationLastTurn();
         updateVoiceHome();
         if (messageList == null) return;
-        messageList.removeAllViews();
-        for (Message message : messages) {
-            messageList.addView(bubble(message));
-            Space gap = new Space(this);
-            messageList.addView(gap, new LinearLayout.LayoutParams(1, dp(18)));
-        }
-        main.postDelayed(() -> messageScroll.fullScroll(View.FOCUS_DOWN), 80);
+        ChatPage.renderMessages(this, ui, messageList, messageScroll, messages);
     }
 
     private String lastConversationLine() {
@@ -827,7 +624,7 @@ public class MainActivity extends Activity {
             lastUserUtterance = message.text.trim();
             conversationMemory = memoryStore.relevantMemory(lastUserUtterance);
             memoryDirtyForRealtime = true;
-            applyContextUpdateIfSafe(false);
+            applyContextUpdateForNextTurn(false);
         }
         maybeCompactMemory();
     }
@@ -885,57 +682,37 @@ public class MainActivity extends Activity {
             return;
         }
 
-        Request request = new Request.Builder()
-                .url(BuildConfig.AGENTLLM_BASE_URL + "/v1/chat/completions")
-                .header("Authorization", "Bearer " + BuildConfig.AGENTLLM_API_KEY)
-                .header("Content-Type", "application/json")
-                .post(RequestBody.create(body.toString(), JSON))
-                .build();
-
-        llmHttp.newCall(request).enqueue(new Callback() {
-            @Override public void onFailure(Call call, IOException error) {
-                main.post(() -> compactInProgress = false);
-            }
-
-            @Override public void onResponse(Call call, Response response) throws IOException {
-                String text = response.body() == null ? "" : response.body().string();
-                if (!response.isSuccessful()) {
-                    main.post(() -> compactInProgress = false);
-                    return;
-                }
+        agents.sendSubconscious(body, new AgentApiClient.ReplyCallback() {
+            @Override public void onSuccess(String content) {
                 String memory = "";
                 String tone = "";
                 try {
-                    String content = new JSONObject(text)
-                            .getJSONArray("choices")
-                            .getJSONObject(0)
-                            .getJSONObject("message")
-                            .optString("content", "")
-                            .trim();
                     JSONObject compact = parseJsonObject(content);
                     memory = compact.optString("memory_md", content).trim();
                     tone = compact.optString("tone_guidance", "").trim();
                 } catch (JSONException error) {
-                    memory = text;
+                    memory = content;
                 }
                 String finalMemory = memory;
                 String finalTone = tone;
-                main.post(() -> {
-                    if (!finalMemory.isEmpty()) {
-                        memoryStore.insertMemory(sessionId, "compact", finalMemory, chunk.firstId, chunk.lastId);
-                        memoryStore.markCompacted(chunk.lastId);
-                    }
-                    if (!finalTone.isEmpty()) {
-                        dynamicTone = finalTone;
-                        memoryStore.insertMemory(sessionId, "tone", finalTone, chunk.firstId, chunk.lastId);
-                    }
-                    conversationMemory = memoryStore.relevantMemory(lastUserUtterance);
-                    compactInProgress = false;
-                    memoryDirtyForRealtime = true;
-                    applyContextUpdateIfSafe(true);
-                });
+                if (!finalMemory.isEmpty()) {
+                    memoryStore.insertMemory(sessionId, "compact", finalMemory, chunk.firstId, chunk.lastId);
+                    memoryStore.markCompacted(chunk.lastId);
+                }
+                if (!finalTone.isEmpty()) {
+                    dynamicTone = finalTone;
+                    memoryStore.insertMemory(sessionId, "tone", finalTone, chunk.firstId, chunk.lastId);
+                }
+                conversationMemory = memoryStore.relevantMemory(lastUserUtterance);
+                compactInProgress = false;
+                memoryDirtyForRealtime = true;
+                applyContextUpdateForNextTurn(true);
             }
-        });
+
+            @Override public void onError(String message) {
+                compactInProgress = false;
+            }
+        }, "记忆压缩");
     }
 
     private JSONObject parseJsonObject(String content) throws JSONException {
@@ -948,17 +725,8 @@ public class MainActivity extends Activity {
         return new JSONObject(trimmed);
     }
 
-    private String extractAssistantContent(String responseText) throws JSONException {
-        return new JSONObject(responseText)
-                .getJSONArray("choices")
-                .getJSONObject(0)
-                .getJSONObject("message")
-                .optString("content", "");
-    }
-
-    private void applyContextUpdateIfSafe(boolean includeFact) {
+    private void applyContextUpdateForNextTurn(boolean includeFact) {
         if (!memoryDirtyForRealtime || !realtime.isOpen()) return;
-        if ("speaking".equals(state) || "thinking".equals(state) || "listening".equals(state) || initializing) return;
         JSONObject payload = new JSONObject();
         try {
             payload.put("instructions", buildInstructions());
@@ -968,25 +736,6 @@ public class MainActivity extends Activity {
         } catch (JSONException ignored) { }
         realtime.sendEvent("context.update", payload);
         memoryDirtyForRealtime = false;
-    }
-
-    private View bubble(Message message) {
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.setGravity(message.role.equals("user") ? Gravity.RIGHT : Gravity.LEFT);
-        LinearLayout column = new LinearLayout(this);
-        column.setOrientation(LinearLayout.VERTICAL);
-        TextView body = text(message.text.isEmpty() ? "..." : message.text, 19, Color.WHITE, 0);
-        body.setLineSpacing(dp(2), 1.0f);
-        body.setPadding(dp(16), dp(13), dp(16), dp(13));
-        body.setBackground(new BubbleDrawable(message.role.equals("user")));
-        column.addView(body, new LinearLayout.LayoutParams(-2, -2));
-        TextView time = text(DateFormat.getTimeInstance(DateFormat.SHORT, Locale.US).format(new Date(message.timestamp)), 12, 0x80FFE0E0, 0);
-        time.setPadding(dp(8), dp(6), dp(8), 0);
-        time.setGravity(message.role.equals("user") ? Gravity.RIGHT : Gravity.LEFT);
-        column.addView(time, new LinearLayout.LayoutParams(-1, -2));
-        int width = getResources().getDisplayMetrics().widthPixels - dp(110);
-        wrap.addView(column, new LinearLayout.LayoutParams(Math.max(dp(190), width), -2));
-        return wrap;
     }
 
     private void sendText(String text) {
@@ -1015,81 +764,34 @@ public class MainActivity extends Activity {
             return;
         }
         setState("thinking");
-        JSONObject body = new JSONObject();
-        JSONArray llmMessages = new JSONArray();
+        String instructions;
         try {
-            JSONObject system = new JSONObject();
-            system.put("role", "system");
-            system.put("content",
-                    buildInstructions() + "\n\n" +
-                    "当前是文本聊天通道。请只输出适合聊天气泡展示的文字，不要描述语音、音频或工具过程。");
-            llmMessages.put(system);
-
-            JSONObject user = new JSONObject();
-            user.put("role", "user");
-            user.put("content", text);
-            llmMessages.put(user);
-
-            body.put("model", TEXT_CHAT_MODEL);
-            body.put("messages", llmMessages);
-            body.put("temperature", 0.7);
-            body.put("stream", false);
-        } catch (JSONException error) {
-            toastError("构建文本聊天请求失败");
-            setState("error");
-            return;
-        }
-
-        Request request = new Request.Builder()
-                .url(BuildConfig.AGENTLLM_BASE_URL + "/v1/chat/completions")
-                .header("Authorization", "Bearer " + BuildConfig.AGENTLLM_API_KEY)
-                .header("Content-Type", "application/json")
-                .post(RequestBody.create(body.toString(), JSON))
-                .build();
-
-        llmHttp.newCall(request).enqueue(new Callback() {
-            @Override public void onFailure(Call call, IOException error) {
-                main.post(() -> {
-                    toastError("文本聊天失败：" + error.getMessage());
-                    setState("error");
-                });
-            }
-
-            @Override public void onResponse(Call call, Response response) throws IOException {
-                String responseText = response.body() == null ? "" : response.body().string();
-                if (!response.isSuccessful()) {
-                    main.post(() -> {
-                        toastError("文本聊天接口失败：" + response.code());
-                        setState("error");
-                    });
-                    return;
-                }
-                String reply;
-                try {
-                    reply = extractAssistantContent(responseText);
-                } catch (JSONException error) {
-                    main.post(() -> {
-                        toastError("解析文本聊天回复失败");
-                        setState("error");
-                    });
-                    return;
-                }
-                String finalReply = reply.trim();
-                main.post(() -> {
-                    if (finalReply.isEmpty()) {
+            instructions = buildInstructions() + "\n\n" +
+                    "当前是文本聊天通道。请只输出适合聊天气泡展示的文字，不要描述语音、音频或工具过程。";
+            agents.sendChat(TEXT_CHAT_MODEL, instructions, text, new AgentApiClient.ReplyCallback() {
+                @Override public void onSuccess(String reply) {
+                    if (reply.isEmpty()) {
                         toastError("文本聊天返回为空");
                         setState("error");
                         return;
                     }
-                    addChatMessage("assistant", finalReply);
+                    addChatMessage("assistant", reply);
                     renderMessages();
                     if (initializing) {
                         updateInitProgress();
                     }
                     setState("ready");
-                });
-            }
-        });
+                }
+
+                @Override public void onError(String message) {
+                    toastError(message);
+                    setState("error");
+                }
+            });
+        } catch (JSONException error) {
+            toastError("构建文本聊天请求失败");
+            setState("error");
+        }
     }
 
     private void toggleMic() {
@@ -1320,21 +1022,16 @@ public class MainActivity extends Activity {
     }
 
     private void scheduleInitializationContextUpdate() {
-        initContextUpdatePending = true;
+        updateInitializationContext();
     }
 
     private void updateInitializationContext() {
         if (!initializing || !realtime.isOpen()) return;
-        if ("speaking".equals(state) || "thinking".equals(state) || "listening".equals(state)) {
-            initContextUpdatePending = true;
-            return;
-        }
         JSONObject payload = new JSONObject();
         try {
             payload.put("instructions", buildInstructions());
         } catch (JSONException ignored) { }
         realtime.sendEvent("context.update", payload);
-        initContextUpdatePending = false;
     }
 
     private void setState(String next) {
@@ -1343,37 +1040,14 @@ public class MainActivity extends Activity {
         if (micButton != null) micButton.setText(next.equals("listening") ? "●" : "♩");
         if (voiceOrbView != null) voiceOrbView.setConversationState(next);
         if ("ready".equals(next) || "idle".equals(next)) {
-            applyContextUpdateIfSafe(false);
+            applyContextUpdateForNextTurn(false);
         }
     }
 
     private void loadVoices() {
-        if (BuildConfig.AGENTVOICE_API_KEY.isEmpty()) return;
-        Request request = new Request.Builder()
-                .url(BuildConfig.AGENTVOICE_BASE_URL + "/v1/voices?model=doubao-realtime")
-                .header("Authorization", "Bearer " + BuildConfig.AGENTVOICE_API_KEY)
-                .build();
-        llmHttp.newCall(request).enqueue(new Callback() {
-            @Override public void onFailure(Call call, IOException e) { }
-            @Override public void onResponse(Call call, Response response) throws IOException {
-                String body = response.body() == null ? "" : response.body().string();
-                if (!response.isSuccessful()) return;
-                try {
-                    JSONArray array = new JSONObject(body).getJSONArray("voices");
-                    List<Voice> loaded = new ArrayList<>();
-                    for (int i = 0; i < array.length(); i++) {
-                        JSONObject item = array.getJSONObject(i);
-                        String id = item.optString("id");
-                        String label = id.equals(DEFAULT_VOICE) ? "Doris Clone" : item.optString("label", id);
-                        loaded.add(new Voice(id, label, item.optString("gender", "voice")));
-                    }
-                    loaded.sort((a, b) -> a.id.equals(DEFAULT_VOICE) ? -1 : b.id.equals(DEFAULT_VOICE) ? 1 : 0);
-                    main.post(() -> {
-                        voices.clear();
-                        voices.addAll(loaded);
-                    });
-                } catch (JSONException ignored) { }
-            }
+        agents.loadVoices(DEFAULT_VOICE, loaded -> {
+            voices.clear();
+            voices.addAll(loaded);
         });
     }
 
@@ -1454,93 +1128,57 @@ public class MainActivity extends Activity {
             return;
         }
 
-        Request request = new Request.Builder()
-                .url(BuildConfig.AGENTLLM_BASE_URL + "/v1/chat/completions")
-                .header("Authorization", "Bearer " + BuildConfig.AGENTLLM_API_KEY)
-                .header("Content-Type", "application/json")
-                .post(RequestBody.create(body.toString(), JSON))
-                .build();
-
-        realtime.http.newCall(request).enqueue(new Callback() {
-            @Override public void onFailure(Call call, IOException error) {
-                main.post(() -> {
-                    summaryInProgress = false;
-                    stopInitProgressAnimation();
-                    toastError("摘要失败：" + error.getMessage());
-                    setState("error");
-                });
-            }
-
-            @Override public void onResponse(Call call, Response response) throws IOException {
-                String text = response.body() == null ? "" : response.body().string();
-                if (!response.isSuccessful()) {
-                    main.post(() -> {
-                        summaryInProgress = false;
-                        stopInitProgressAnimation();
-                        toastError("摘要接口失败：" + response.code());
-                        setState("error");
-                    });
-                    return;
-                }
+        agents.sendSubconscious(body, new AgentApiClient.ReplyCallback() {
+            @Override public void onSuccess(String content) {
+                String extractedUserName = "";
+                String userMd = content;
+                String agentMd = "- Agent name: " + agentName + "\n- 默认语气：温柔大姐姐。\n- 与用户的关系定位：未明确。";
                 try {
-                    JSONObject json = new JSONObject(text);
-                    String content = json.getJSONArray("choices")
-                            .getJSONObject(0)
-                            .getJSONObject("message")
-                            .optString("content", "")
-                            .trim();
-                    String extractedUserName = "";
-                    String userMd = content;
-                    String agentMd = "- Agent name: " + agentName + "\n- 默认语气：温柔大姐姐。\n- 与用户的关系定位：未明确。";
-                    try {
-                        JSONObject profile = parseJsonObject(content);
-                        extractedUserName = profile.optString("user_name", "").trim();
-                        userMd = profile.optString("user_md", content).trim();
-                        agentMd = profile.optString("agent_md", agentMd).trim();
-                    } catch (JSONException ignored) {
-                        extractedUserName = extractUserName(content);
-                    }
-                    String memory = "# user.md\n\n" +
-                            "- Agent name: " + agentName + "\n" +
-                            "- Created at: " + new Date() + "\n\n" +
-                            userMd + "\n";
-                    String agentProfile = "# Agent.md\n\n" +
-                            "- Agent name: " + agentName + "\n" +
-                            "- Created at: " + new Date() + "\n\n" +
-                            agentMd + "\n";
-                    String finalUserName = extractedUserName;
-                    main.post(() -> {
-                        writeUserMemory(memory);
-                        writeAgentMemory(agentProfile);
-                        userMemory = memory;
-                        agentMemory = agentProfile;
-                        userName = finalUserName.isEmpty() ? displayUserName() : finalUserName;
-                        getSharedPreferences("her", MODE_PRIVATE).edit().putString("user_name", userName).apply();
-                        initialized = true;
-                        initializing = false;
-                        summaryInProgress = false;
-                        initSummaryPending = false;
-                        stopInitProgressAnimation();
-                        if (memoryStore != null) {
-                            memoryStore.insertMemory(sessionId, "profile", memory, 0, 0);
-                            memoryStore.insertMemory(sessionId, "agent", agentProfile, 0, 0);
-                            conversationMemory = memoryStore.relevantMemory("");
-                        }
-                        messages.clear();
-                        messages.add(new Message("memory-ready", "assistant", "初始化完成。"));
-                        setState("idle");
-                        showInitializationCompleteThenHome();
-                    });
+                    JSONObject profile = parseJsonObject(content);
+                    extractedUserName = profile.optString("user_name", "").trim();
+                    userMd = profile.optString("user_md", content).trim();
+                    agentMd = profile.optString("agent_md", agentMd).trim();
                 } catch (JSONException error) {
-                    main.post(() -> {
-                        summaryInProgress = false;
-                        stopInitProgressAnimation();
-                        toastError("解析摘要失败");
-                        setState("error");
-                    });
+                    extractedUserName = extractUserName(content);
                 }
+                String memory = "# user.md\n\n" +
+                        "- Agent name: " + agentName + "\n" +
+                        "- Created at: " + new Date() + "\n\n" +
+                        userMd + "\n";
+                String agentProfile = "# Agent.md\n\n" +
+                        "- Agent name: " + agentName + "\n" +
+                        "- Created at: " + new Date() + "\n\n" +
+                        agentMd + "\n";
+                String finalUserName = extractedUserName;
+                writeUserMemory(memory);
+                writeAgentMemory(agentProfile);
+                userMemory = memory;
+                agentMemory = agentProfile;
+                userName = finalUserName.isEmpty() ? displayUserName() : finalUserName;
+                getSharedPreferences("her", MODE_PRIVATE).edit().putString("user_name", userName).apply();
+                initialized = true;
+                initializing = false;
+                summaryInProgress = false;
+                initSummaryPending = false;
+                stopInitProgressAnimation();
+                if (memoryStore != null) {
+                    memoryStore.insertMemory(sessionId, "profile", memory, 0, 0);
+                    memoryStore.insertMemory(sessionId, "agent", agentProfile, 0, 0);
+                    conversationMemory = memoryStore.relevantMemory("");
+                }
+                messages.clear();
+                messages.add(new Message("memory-ready", "assistant", "初始化完成。"));
+                setState("idle");
+                showInitializationCompleteThenHome();
             }
-        });
+
+            @Override public void onError(String message) {
+                summaryInProgress = false;
+                stopInitProgressAnimation();
+                toastError(message);
+                setState("error");
+            }
+        }, "摘要");
     }
 
     private String buildInstructions() {
@@ -1597,34 +1235,23 @@ public class MainActivity extends Activity {
     }
 
     private TextView icon(String value) {
-        TextView view = text(value, 29, Color.WHITE, 0);
-        view.setGravity(Gravity.CENTER);
-        view.setClickable(true);
-        return view;
+        return ui.icon(value);
     }
 
     private TextView text(String value, int sp, int color, int weight) {
-        TextView view = new TextView(this);
-        view.setText(value);
-        view.setTextSize(sp);
-        view.setTextColor(color);
-        view.setIncludeFontPadding(true);
-        if (weight > 0) view.setTypeface(Typeface.DEFAULT, weight >= 700 ? Typeface.BOLD : Typeface.NORMAL);
-        return view;
+        return ui.text(value, sp, color, weight);
     }
 
     private FrameLayout.LayoutParams frame(int width, int height) {
-        return new FrameLayout.LayoutParams(width, height);
+        return ui.frame(width, height);
     }
 
     private FrameLayout.LayoutParams frame(int width, int height, int gravity) {
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(width, height);
-        params.gravity = gravity;
-        return params;
+        return ui.frame(width, height, gravity);
     }
 
     private int dp(float value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return ui.dp(value);
     }
 
     private String newId(String prefix) {
@@ -1644,135 +1271,32 @@ public class MainActivity extends Activity {
         return object;
     }
 
-    private final class RealtimeClient extends WebSocketListener {
-        final OkHttpClient http = new OkHttpClient.Builder()
-                .pingInterval(20, TimeUnit.SECONDS)
-                .build();
-        WebSocket socket;
-        boolean sessionCreated = false;
-
-        boolean isOpen() {
-            return socket != null && sessionCreated;
-        }
-
-        void connect() {
-            if (BuildConfig.AGENTVOICE_API_KEY.isEmpty()) {
-                toastError("Missing AGENTVOICE_API_KEY in gradle.properties");
-                return;
-            }
-            if (socket != null) return;
-            Log.d(TAG, "connect realtime");
-            setState("connecting");
-            String key;
-            try {
-                key = URLEncoder.encode(BuildConfig.AGENTVOICE_API_KEY, "UTF-8");
-            } catch (UnsupportedEncodingException e) {
-                key = BuildConfig.AGENTVOICE_API_KEY;
-            }
-            Request request = new Request.Builder()
-                    .url(BuildConfig.AGENTVOICE_REALTIME_URL + "?api_key=" + key)
-                    .build();
-            socket = http.newWebSocket(request, this);
-        }
-
-        @Override public void onOpen(WebSocket webSocket, Response response) {
-            Log.d(TAG, "websocket open");
-            sendEvent("session.start", sessionPayload());
-        }
-
-        @Override public void onMessage(WebSocket webSocket, String text) {
-            try {
-                JSONObject event = new JSONObject(text);
-                JSONObject payload = event.optJSONObject("payload");
-                String type = event.optString("type");
-                Log.d(TAG, "event " + type + " payload=" + (payload == null ? "{}" : payload.toString()));
-                main.post(() -> handleEvent(type, payload));
-            } catch (JSONException e) {
-                toastError("Bad realtime event");
-            }
-        }
-
-        @Override public void onMessage(WebSocket webSocket, ByteString bytes) {
-            Log.d(TAG, "audio bytes " + bytes.size());
-            player.play(bytes.toByteArray());
-        }
-
-        @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
-            socket = null;
-            sessionCreated = false;
-            Log.e(TAG, "websocket failure", t);
-            main.post(() -> {
-                setState("error");
-                toastError(t.getMessage() == null ? "Realtime failed" : t.getMessage());
-            });
-        }
-
-        @Override public void onClosed(WebSocket webSocket, int code, String reason) {
-            socket = null;
-            sessionCreated = false;
-            Log.d(TAG, "websocket closed code=" + code + " reason=" + reason);
-            main.post(() -> setState(summaryInProgress ? "summarizing" : "idle"));
-        }
-
-        void close() {
-            sessionCreated = false;
-            if (socket != null) {
-                socket.close(1000, "client closing");
-                socket = null;
-            }
-        }
-
-        void sendInputText(String text) {
-            Log.d(TAG, "send input_text " + text);
-            JSONObject payload = new JSONObject();
-            try {
-                payload.put("text", text);
-            } catch (JSONException ignored) { }
-            sendEvent("input_text", payload);
-        }
-
-        void sendAudio(byte[] bytes) {
-            if (socket != null) socket.send(ByteString.of(bytes));
-        }
-
-        void sendEvent(String type, JSONObject payload) {
-            if (socket == null) return;
-            Log.d(TAG, "send event " + type);
-            JSONObject envelope = new JSONObject();
-            try {
-                envelope.put("type", type);
-                if (payload != null) envelope.put("payload", payload);
-            } catch (JSONException ignored) { }
-            socket.send(envelope.toString());
-        }
-
-        private JSONObject sessionPayload() {
-            JSONObject payload = new JSONObject();
-            JSONObject audio = new JSONObject();
-            JSONObject client = new JSONObject();
-            try {
-                audio.put("input_format", "pcm16");
-                audio.put("output_format", "pcm16");
-                audio.put("sample_rate", 16000);
-                audio.put("channels", 1);
-                audio.put("frame_duration_ms", 20);
-                client.put("type", "android");
-                client.put("version", "1.0.0");
-                payload.put("agent_id", "omnia_default");
-                payload.put("mode", "realtime");
-                payload.put("model_profile", "realtime_doubao");
-                payload.put("audio", audio);
-                payload.put("instructions", buildInstructions());
-                payload.put("voice", selectedVoiceId);
-                payload.put("client", client);
-            } catch (JSONException ignored) { }
-            return payload;
-        }
+    private JSONObject sessionPayload() {
+        JSONObject payload = new JSONObject();
+        JSONObject audio = new JSONObject();
+        JSONObject client = new JSONObject();
+        try {
+            audio.put("input_format", "pcm16");
+            audio.put("output_format", "pcm16");
+            audio.put("sample_rate", 16000);
+            audio.put("channels", 1);
+            audio.put("frame_duration_ms", 20);
+            client.put("type", "android");
+            client.put("version", "1.0.0");
+            payload.put("agent_id", "omnia_default");
+            payload.put("mode", "realtime");
+            payload.put("model_profile", "realtime_doubao");
+            payload.put("audio", audio);
+            payload.put("instructions", buildInstructions());
+            payload.put("voice", selectedVoiceId);
+            payload.put("client", client);
+        } catch (JSONException ignored) { }
+        return payload;
     }
 
     private void handleEvent(String type, JSONObject payload) {
         if ("session.created".equals(type)) {
-            realtime.sessionCreated = true;
+            realtime.markSessionCreated();
             setState("ready");
             onRealtimeReady();
         } else if ("asr.final".equals(type) && payload != null) {
@@ -1813,18 +1337,12 @@ public class MainActivity extends Activity {
                 return;
             }
             setState("ready");
-            if (initializing && initContextUpdatePending) {
-                updateInitializationContext();
-            }
             scheduleContinuousListening(650);
         } else if ("output_audio.stop".equals(type)) {
             player.stop();
             persistActiveAssistantMessage();
             activeAssistantId = null;
             setState(mic.running ? "listening" : "ready");
-            if (initializing && initContextUpdatePending && !mic.running && !inputAudioOpen) {
-                updateInitializationContext();
-            }
             if (!mic.running && !inputAudioOpen) scheduleContinuousListening(180);
         } else if ("memory.snapshot".equals(type) && payload != null) {
             handleMemorySnapshot(payload);
@@ -1904,601 +1422,4 @@ public class MainActivity extends Activity {
         });
     }
 
-    interface AudioSink {
-        void onAudio(byte[] bytes);
-    }
-
-    private final class MicStreamer {
-        volatile boolean running = false;
-        AudioRecord recorder;
-        AcousticEchoCanceler echoCanceler;
-        NoiseSuppressor noiseSuppressor;
-        AutomaticGainControl gainControl;
-        Thread thread;
-
-        boolean start(AudioSink sink) {
-            if (running) return true;
-            int min = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            int bufferSize = Math.max(min, 16000);
-            recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, 16000,
-                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
-            if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
-                recorder.release();
-                recorder = null;
-                return false;
-            }
-            enableEffects(recorder.getAudioSessionId());
-            running = true;
-            try {
-                recorder.startRecording();
-            } catch (IllegalStateException error) {
-                running = false;
-                releaseRecorder();
-                return false;
-            }
-            thread = new Thread(() -> {
-                byte[] buffer = new byte[640];
-                while (running) {
-                    int read = recorder.read(buffer, 0, buffer.length);
-                    if (read > 0) {
-                        byte[] out = new byte[read];
-                        System.arraycopy(buffer, 0, out, 0, read);
-                        sink.onAudio(out);
-                    }
-                }
-            }, "her-mic");
-            thread.start();
-            return true;
-        }
-
-        void stop() {
-            running = false;
-            releaseRecorder();
-        }
-
-        private void enableEffects(int sessionId) {
-            try {
-                if (AcousticEchoCanceler.isAvailable()) {
-                    echoCanceler = AcousticEchoCanceler.create(sessionId);
-                    if (echoCanceler != null) echoCanceler.setEnabled(true);
-                }
-            } catch (Throwable ignored) { }
-            try {
-                if (NoiseSuppressor.isAvailable()) {
-                    noiseSuppressor = NoiseSuppressor.create(sessionId);
-                    if (noiseSuppressor != null) noiseSuppressor.setEnabled(true);
-                }
-            } catch (Throwable ignored) { }
-            try {
-                if (AutomaticGainControl.isAvailable()) {
-                    gainControl = AutomaticGainControl.create(sessionId);
-                    if (gainControl != null) gainControl.setEnabled(true);
-                }
-            } catch (Throwable ignored) { }
-        }
-
-        private void releaseRecorder() {
-            if (echoCanceler != null) {
-                echoCanceler.release();
-                echoCanceler = null;
-            }
-            if (noiseSuppressor != null) {
-                noiseSuppressor.release();
-                noiseSuppressor = null;
-            }
-            if (gainControl != null) {
-                gainControl.release();
-                gainControl = null;
-            }
-            if (recorder != null) {
-                try { recorder.stop(); } catch (Exception ignored) { }
-                recorder.release();
-                recorder = null;
-            }
-        }
-    }
-
-    private final class PcmPlayer {
-        AudioTrack track;
-        int sampleRate = 24000;
-
-        synchronized void begin(int rate) {
-            sampleRate = rate;
-            Log.d(TAG, "player begin sampleRate=" + sampleRate);
-            ensureTrack();
-        }
-
-        synchronized void play(byte[] bytes) {
-            ensureTrack();
-            int written = track.write(bytes, 0, bytes.length);
-            Log.d(TAG, "player write bytes=" + bytes.length + " written=" + written + " state=" + track.getPlayState());
-        }
-
-        synchronized void stop() {
-            if (track != null) {
-                try { track.pause(); } catch (Exception ignored) { }
-                try { track.flush(); } catch (Exception ignored) { }
-                track.release();
-                track = null;
-            }
-        }
-
-        private void ensureTrack() {
-            if (track != null) return;
-            int min = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            Log.d(TAG, "create AudioTrack min=" + min + " rate=" + sampleRate);
-            track = new AudioTrack.Builder()
-                    .setAudioAttributes(new AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build())
-                    .setAudioFormat(new AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .build())
-                    .setBufferSizeInBytes(Math.max(min, sampleRate))
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build();
-            track.play();
-            Log.d(TAG, "AudioTrack playState=" + track.getPlayState());
-        }
-    }
-
-    private static final class Message {
-        final String id;
-        final String role;
-        String text;
-        final long timestamp = System.currentTimeMillis();
-        Message(String id, String role, String text) {
-            this.id = id;
-            this.role = role;
-            this.text = text;
-        }
-    }
-
-    private static final class Voice {
-        final String id;
-        final String label;
-        final String gender;
-        Voice(String id, String label, String gender) {
-            this.id = id;
-            this.label = label;
-            this.gender = gender;
-        }
-    }
-
-    private static final class MemoryChunk {
-        final long firstId;
-        final long lastId;
-        final String transcript;
-        MemoryChunk(long firstId, long lastId, String transcript) {
-            this.firstId = firstId;
-            this.lastId = lastId;
-            this.transcript = transcript;
-        }
-    }
-
-    private static final class MemoryStore extends SQLiteOpenHelper {
-        MemoryStore(Activity activity) {
-            super(activity, "her_memory.db", null, 1);
-        }
-
-        @Override public void onCreate(SQLiteDatabase db) {
-            db.execSQL("CREATE TABLE sessions (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
-                    "agent_name TEXT NOT NULL," +
-                    "started_at INTEGER NOT NULL)");
-            db.execSQL("CREATE TABLE messages (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
-                    "session_id INTEGER NOT NULL," +
-                    "role TEXT NOT NULL," +
-                    "content TEXT NOT NULL," +
-                    "created_at INTEGER NOT NULL," +
-                    "compacted INTEGER NOT NULL DEFAULT 0)");
-            db.execSQL("CREATE TABLE memories (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
-                    "session_id INTEGER NOT NULL," +
-                    "kind TEXT NOT NULL," +
-                    "content TEXT NOT NULL," +
-                    "source_first_message_id INTEGER," +
-                    "source_last_message_id INTEGER," +
-                    "created_at INTEGER NOT NULL)");
-            db.execSQL("CREATE VIRTUAL TABLE memory_fts USING fts4(content, kind)");
-            db.execSQL("CREATE INDEX idx_messages_session_compacted ON messages(session_id, compacted, id)");
-            db.execSQL("CREATE INDEX idx_memories_kind ON memories(kind, created_at)");
-        }
-
-        @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-            db.execSQL("DROP TABLE IF EXISTS memory_fts");
-            db.execSQL("DROP TABLE IF EXISTS memories");
-            db.execSQL("DROP TABLE IF EXISTS messages");
-            db.execSQL("DROP TABLE IF EXISTS sessions");
-            onCreate(db);
-        }
-
-        long startSession(String agentName) {
-            ContentValues values = new ContentValues();
-            values.put("agent_name", agentName);
-            values.put("started_at", System.currentTimeMillis());
-            return getWritableDatabase().insert("sessions", null, values);
-        }
-
-        void insertMessage(long sessionId, String role, String content) {
-            ContentValues values = new ContentValues();
-            values.put("session_id", sessionId);
-            values.put("role", role);
-            values.put("content", content);
-            values.put("created_at", System.currentTimeMillis());
-            getWritableDatabase().insert("messages", null, values);
-        }
-
-        void insertMemory(long sessionId, String kind, String content, long firstId, long lastId) {
-            SQLiteDatabase db = getWritableDatabase();
-            ContentValues values = new ContentValues();
-            values.put("session_id", sessionId);
-            values.put("kind", kind);
-            values.put("content", content);
-            values.put("source_first_message_id", firstId);
-            values.put("source_last_message_id", lastId);
-            values.put("created_at", System.currentTimeMillis());
-            db.insert("memories", null, values);
-
-            ContentValues fts = new ContentValues();
-            fts.put("content", content);
-            fts.put("kind", kind);
-            db.insert("memory_fts", null, fts);
-        }
-
-        MemoryChunk unsummarizedChunk(long sessionId, int minCount, int minChars) {
-            Cursor cursor = getReadableDatabase().rawQuery(
-                    "SELECT id, role, content FROM messages WHERE session_id=? AND compacted=0 ORDER BY id ASC",
-                    new String[]{String.valueOf(sessionId)});
-            long first = 0;
-            long last = 0;
-            int count = 0;
-            StringBuilder transcript = new StringBuilder();
-            try {
-                while (cursor.moveToNext()) {
-                    long id = cursor.getLong(0);
-                    if (first == 0) first = id;
-                    last = id;
-                    count++;
-                    transcript.append(cursor.getString(1)).append(": ")
-                            .append(cursor.getString(2)).append('\n');
-                }
-            } finally {
-                cursor.close();
-            }
-            if (count < minCount && transcript.length() < minChars) return null;
-            return new MemoryChunk(first, last, transcript.toString());
-        }
-
-        void markCompacted(long lastId) {
-            ContentValues values = new ContentValues();
-            values.put("compacted", 1);
-            getWritableDatabase().update("messages", values, "id<=?", new String[]{String.valueOf(lastId)});
-        }
-
-        String relevantMemory(String query) {
-            StringBuilder builder = new StringBuilder();
-            if (query != null && !query.trim().isEmpty()) {
-                String match = sanitizeFts(query);
-                if (!match.isEmpty()) {
-                    Cursor cursor = getReadableDatabase().rawQuery(
-                            "SELECT kind, content FROM memory_fts WHERE memory_fts MATCH ? LIMIT 4",
-                            new String[]{match});
-                    try {
-                        while (cursor.moveToNext()) {
-                            builder.append("- [").append(cursor.getString(0)).append("] ")
-                                    .append(cursor.getString(1)).append('\n');
-                        }
-                    } finally {
-                        cursor.close();
-                    }
-                }
-            }
-            Cursor recent = getReadableDatabase().rawQuery(
-                    "SELECT kind, content FROM memories ORDER BY id DESC LIMIT 6", null);
-            try {
-                while (recent.moveToNext()) {
-                    builder.append("- [").append(recent.getString(0)).append("] ")
-                            .append(recent.getString(1)).append('\n');
-                }
-            } finally {
-                recent.close();
-            }
-            return builder.toString();
-        }
-
-        String latestTone() {
-            Cursor cursor = getReadableDatabase().rawQuery(
-                    "SELECT content FROM memories WHERE kind='tone' ORDER BY id DESC LIMIT 1", null);
-            try {
-                if (cursor.moveToFirst()) return cursor.getString(0);
-            } finally {
-                cursor.close();
-            }
-            return "保持温柔大姐姐语气：成熟、关照、亲近但有边界。";
-        }
-
-        void resetAll() {
-            SQLiteDatabase db = getWritableDatabase();
-            db.delete("memory_fts", null, null);
-            db.delete("memories", null, null);
-            db.delete("messages", null, null);
-            db.delete("sessions", null, null);
-        }
-
-        void clearSession(long sessionId) {
-            SQLiteDatabase db = getWritableDatabase();
-            db.delete("messages", "session_id=?", new String[]{String.valueOf(sessionId)});
-            db.delete("sessions", "id=?", new String[]{String.valueOf(sessionId)});
-        }
-
-        private String sanitizeFts(String query) {
-            String normalized = query.replaceAll("[^\\p{L}\\p{N}\\s]", " ").trim();
-            if (normalized.isEmpty()) return "";
-            String[] parts = normalized.split("\\s+");
-            StringBuilder builder = new StringBuilder();
-            for (String part : parts) {
-                if (part.length() < 2) continue;
-                if (builder.length() > 0) builder.append(' ');
-                builder.append(part);
-            }
-            return builder.toString();
-        }
-    }
-
-    private class HerMarkView extends View {
-        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        HerMarkView(Activity activity) {
-            super(activity);
-            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-            setClickable(true);
-        }
-        @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float w = getWidth();
-            float h = getHeight();
-            float cx = w / 2f;
-            float cy = h / 2f;
-            float r = Math.min(w, h) * 0.37f;
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            paint.setColor(0xDDFFFFFF);
-            paint.setStrokeWidth(dp(1));
-            canvas.drawCircle(cx, cy, r, paint);
-            paint.setColor(0x44FFFFFF);
-            canvas.drawCircle(cx, cy, r + dp(12), paint);
-            canvas.drawCircle(cx, cy, r + dp(22), paint);
-            paint.setColor(Color.WHITE);
-            paint.setStrokeWidth(dp(4));
-            Path path = new Path();
-            float left = cx - r * 0.55f;
-            float right = cx + r * 0.55f;
-            path.moveTo(left, cy);
-            path.cubicTo(left, cy - r * 0.36f, cx - r * 0.12f, cy - r * 0.36f, cx, cy);
-            path.cubicTo(cx + r * 0.12f, cy + r * 0.36f, right, cy + r * 0.36f, right, cy);
-            path.cubicTo(right, cy - r * 0.36f, cx + r * 0.12f, cy - r * 0.36f, cx, cy);
-            path.cubicTo(cx - r * 0.12f, cy + r * 0.36f, left, cy + r * 0.36f, left, cy);
-            canvas.drawPath(path, paint);
-        }
-    }
-
-    private final class InitOrbView extends HerMarkView {
-        final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
-        long started = SystemClock.uptimeMillis();
-        InitOrbView(Activity activity) {
-            super(activity);
-        }
-        @Override protected void onAttachedToWindow() {
-            super.onAttachedToWindow();
-            postInvalidateOnAnimation();
-        }
-        @Override protected void onDraw(Canvas canvas) {
-            float t = ((SystemClock.uptimeMillis() - started) % 3600) / 3600f;
-            float w = getWidth();
-            float h = getHeight();
-            float cx = w / 2f;
-            float cy = h / 2f;
-            if (summaryInProgress) {
-                float flip = (float) Math.cos(t * Math.PI * 8);
-                canvas.save();
-                canvas.scale(Math.max(0.18f, Math.abs(flip)), 1f, cx, cy);
-                canvas.rotate(t * 360f, cx, cy);
-            }
-            float base = Math.min(w, h) * 0.38f;
-            glow.setStyle(Paint.Style.STROKE);
-            glow.setStrokeCap(Paint.Cap.ROUND);
-            for (int i = 0; i < 4; i++) {
-                float phase = (t + i * 0.18f) % 1f;
-                int alpha = (int) (95 * (1f - phase));
-                glow.setColor((alpha << 24) | 0x00FFFFFF);
-                glow.setStrokeWidth(dp(1.2f + i * 0.3f));
-                canvas.drawCircle(cx, cy, base + dp(8) + phase * dp(36), glow);
-            }
-            glow.setStyle(Paint.Style.FILL);
-            glow.setShader(new LinearGradient(0, 0, w, h, 0x44FFFFFF, 0x11FF6377, Shader.TileMode.CLAMP));
-            canvas.drawCircle(cx, cy, base * (0.92f + 0.04f * (float) Math.sin(t * Math.PI * 2)), glow);
-            glow.setShader(null);
-            super.onDraw(canvas);
-            if (summaryInProgress) canvas.restore();
-            postInvalidateOnAnimation();
-        }
-    }
-
-    private final class VoiceOrbView extends HerMarkView {
-        final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
-        long started = SystemClock.uptimeMillis();
-        int level = 0;
-        String conversationState = "idle";
-
-        VoiceOrbView(Activity activity) {
-            super(activity);
-        }
-
-        void setLevel(int next) {
-            level = Math.max(0, Math.min(100, next));
-            invalidate();
-        }
-
-        void setConversationState(String next) {
-            conversationState = next == null ? "idle" : next;
-            invalidate();
-        }
-
-        @Override protected void onAttachedToWindow() {
-            super.onAttachedToWindow();
-            postInvalidateOnAnimation();
-        }
-
-        @Override protected void onDraw(Canvas canvas) {
-            float t = ((SystemClock.uptimeMillis() - started) % 2400) / 2400f;
-            float w = getWidth();
-            float h = getHeight();
-            float cx = w / 2f;
-            float cy = h / 2f;
-            float energy = level / 100f;
-            if ("speaking".equals(conversationState)) {
-                energy = Math.max(energy, 0.34f + 0.14f * (float) Math.sin(t * Math.PI * 4));
-            } else if ("thinking".equals(conversationState) || "connecting".equals(conversationState)) {
-                energy = Math.max(energy, 0.18f + 0.08f * (float) Math.sin(t * Math.PI * 2));
-            } else if ("listening".equals(conversationState)) {
-                energy = Math.max(energy, 0.12f);
-            }
-
-            float base = Math.min(w, h) * (0.35f + energy * 0.035f);
-            glow.setStyle(Paint.Style.FILL);
-            glow.setShader(new LinearGradient(0, 0, w, h,
-                    0x33FFFFFF, "listening".equals(conversationState) ? 0x33FF6377 : 0x22B96A7C,
-                    Shader.TileMode.CLAMP));
-            canvas.drawCircle(cx, cy, base + dp(18) * energy, glow);
-            glow.setShader(null);
-
-            glow.setStyle(Paint.Style.STROKE);
-            glow.setStrokeCap(Paint.Cap.ROUND);
-            for (int i = 0; i < 4; i++) {
-                float phase = (t + i * 0.2f) % 1f;
-                int alpha = (int) ((55 + 85 * energy) * (1f - phase));
-                glow.setColor((Math.max(0, Math.min(160, alpha)) << 24) | 0x00FFFFFF);
-                glow.setStrokeWidth(dp(1.2f + energy * 2.2f));
-                canvas.drawCircle(cx, cy, base + dp(10) + phase * dp(44 + 18 * energy), glow);
-            }
-
-            canvas.save();
-            float scale = 1f + energy * 0.05f;
-            canvas.scale(scale, scale, cx, cy);
-            super.onDraw(canvas);
-            canvas.restore();
-            postInvalidateOnAnimation();
-        }
-    }
-
-    private final class SwatchView extends View {
-        final int color;
-        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        SwatchView(Activity activity, int color) {
-            super(activity);
-            this.color = color;
-        }
-        @Override protected void onDraw(Canvas canvas) {
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(color);
-            canvas.drawCircle(getWidth() / 2f, getHeight() / 2f, Math.min(getWidth(), getHeight()) * 0.45f, paint);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(1));
-            paint.setColor(0xDDFFFFFF);
-            canvas.drawCircle(getWidth() / 2f, getHeight() / 2f, Math.min(getWidth(), getHeight()) * 0.45f, paint);
-        }
-    }
-
-    private final class AudioLevelView extends View {
-        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        int level = 0;
-        AudioLevelView(Activity activity) {
-            super(activity);
-        }
-        void setLevel(int next) {
-            level = Math.max(0, Math.min(100, next));
-            invalidate();
-        }
-        @Override protected void onDraw(Canvas canvas) {
-            float radius = getHeight() / 2f;
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0x26FFFFFF);
-            canvas.drawRoundRect(new RectF(0, 0, getWidth(), getHeight()), radius, radius, paint);
-            float width = Math.max(getHeight(), getWidth() * (level / 100f));
-            paint.setColor(0xFFFF6377);
-            canvas.drawRoundRect(new RectF(0, 0, width, getHeight()), radius, radius, paint);
-        }
-    }
-
-    private final class MoodVeil extends View {
-        final Paint paint = new Paint();
-        int mood = 0;
-        MoodVeil(Activity activity) {
-            super(activity);
-        }
-
-        void setMood(int next) {
-            if (mood == next) return;
-            mood = next;
-            invalidate();
-        }
-
-        @Override protected void onDraw(Canvas canvas) {
-            int start;
-            int end;
-            int wash;
-            if (mood == 1) {
-                start = 0x806E6EA8;
-                end = 0xAA221C34;
-                wash = 0x262B2343;
-            } else if (mood == 2) {
-                start = 0x80D64C58;
-                end = 0xAA3D2530;
-                wash = 0x24FFB15C;
-            } else if (mood == 3) {
-                start = 0x8055798B;
-                end = 0xAA202D35;
-                wash = 0x24233345;
-            } else {
-                start = 0x80C93445;
-                end = 0xAA281D2C;
-                wash = 0x2230182A;
-            }
-            paint.setShader(new LinearGradient(0, 0, getWidth(), getHeight(),
-                    start, end, Shader.TileMode.CLAMP));
-            canvas.drawRect(0, 0, getWidth(), getHeight(), paint);
-            paint.setShader(null);
-            paint.setColor(wash);
-            canvas.drawRect(0, 0, getWidth(), getHeight(), paint);
-        }
-    }
-
-    private final class BubbleDrawable extends android.graphics.drawable.Drawable {
-        final boolean user;
-        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        BubbleDrawable(boolean user) {
-            this.user = user;
-        }
-        @Override public void draw(Canvas canvas) {
-            paint.setColor(user ? 0xB08F3846 : 0xB0A93C4E);
-            canvas.drawRoundRect(new RectF(getBounds()), dp(7), dp(7), paint);
-        }
-        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
-        @Override public void setColorFilter(android.graphics.ColorFilter colorFilter) { paint.setColorFilter(colorFilter); }
-        @Override public int getOpacity() { return android.graphics.PixelFormat.TRANSLUCENT; }
-    }
-
-    private final class BottomLineDrawable extends android.graphics.drawable.ColorDrawable {
-        final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        @Override public void draw(Canvas canvas) {
-            super.draw(canvas);
-            paint.setColor(0x18FFFFFF);
-            paint.setStrokeWidth(1);
-            canvas.drawLine(0, getBounds().bottom - 1, getBounds().right, getBounds().bottom - 1, paint);
-        }
-    }
 }
