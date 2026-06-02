@@ -48,6 +48,7 @@ import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -69,11 +70,19 @@ public class MainActivity extends Activity {
     private static final int RECENT_SESSION_MESSAGES = 16;
     private static final long CHAT_ACTIVE_UNLOCK_MS = 60_000;
     private static final long HEADSET_DOUBLE_TAP_MS = 520;
+    private static final long RESPONSE_PENDING_VISIBLE_TIMEOUT_MS = 10_000;
+    private static final long ASR_FINAL_TIMEOUT_MS = 2_800;
     private static final String USER_MEMORY_FILE = "user.md";
     private static final String AGENT_MEMORY_FILE = "Agent.md";
     private static final String SYSTEM_AGENT_NAME = "Doris";
     private static final String TEXT_CHAT_MODEL = "c-her";
     private static final String BACKGROUND_MODEL = "c-her";
+    private static final String PREF_DEMO_MODE = "demo_mode";
+    private static final String[] AGENT_NAME_CANDIDATE_NAMES = {
+            "Ava", "Chloe", "Nora", "Clara", "Mira", "Aria",
+            "Iris", "Luna", "Elara", "Serena", "Evelyn", "Victoria"
+    };
+    private static final String AGENT_NAME_CANDIDATES = "Ava、Chloe、Nora、Clara、Mira、Aria、Iris、Luna、Elara、Serena、Evelyn、Victoria";
     private static final String DEFAULT_VOICE = BuildConfig.AGENTVOICE_CLONED_VOICE;
     private static final String INSTRUCTIONS =
             "你是一个像 Her 里那样亲密、聪明、有温度的中文陪伴式语音助手。\n" +
@@ -81,17 +90,18 @@ public class MainActivity extends Activity {
             "你正在和用户进行实时语音或文字对话。回复要自然、短一些，有情绪感，但不要装腔作势。\n" +
             "当用户焦虑、孤独、疲惫或犹豫时，先共情，再给一个轻柔可执行的下一步。";
     private static final String INIT_BASE_PROMPT =
-            "你是 Doris，一个 AI Agent，也是用户的朋友和助理。\n" +
+            "你是一个 AI Agent，也是用户的朋友和助理。\n" +
             "你是语音交互模型，负责自然说话和倾听；c-her 是后台意识模型，负责工具调用、总结与写入长期记忆。\n" +
-            "你正在进行首次初始化，不是普通聊天。目标是温柔、自然地收集三类信息：用户姓名/希望被如何称呼、用户希望和 Doris 的关系、用户的故事。\n" +
+            "你正在进行首次初始化，不是普通聊天。目标是温柔、自然地收集三类信息：用户姓名/希望被如何称呼、用户希望和你的关系、用户的故事。\n" +
             "用户的故事是一段开放式自我介绍，可以包括近况、经历、在意的事、期待、边界或希望你记住的内容。\n" +
             "每次只问一个问题，回复要短，不要展开闲聊，不要一次列清单。";
     private static final String INIT_WAKE_EVENT =
-            "【系统事件】用户刚打开应用，正在等待 Doris 主动问候。请不要复述本事件；请直接用第一人称主动介绍自己，并问第一个初始化问题。";
+            "【系统事件】用户刚打开应用，正在等待 Agent 主动问候。请不要复述本事件；请直接用第一人称主动介绍自己，并问第一个初始化问题。";
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Message> messages = new ArrayList<>();
     private final List<Voice> voices = new ArrayList<>();
+    private final Random random = new Random();
     private final RealtimeClient realtime = new RealtimeClient(TAG, new RealtimeClient.Host() {
         @Override public Handler mainHandler() {
             return main;
@@ -115,11 +125,29 @@ public class MainActivity extends Activity {
         }
 
         @Override public void onRealtimeError(String message) {
+            if (initializing) {
+                degradeRealtimeForInitialization(message);
+                return;
+            }
             setState("error");
             toastError(message);
         }
 
         @Override public void onRealtimeClosed() {
+            discardRealtimeAudioUntilDone = false;
+            realtimeOutputActive = false;
+            if (hasPendingToolTtsPlayback()) {
+                setState("ready");
+                if (maybeStartToolTtsAfterRealtimeStopped()) return;
+            }
+            if (toolTtsPlaybackActive) {
+                setState("speaking");
+                return;
+            }
+            if (initializing && !summaryInProgress) {
+                setState("text_only");
+                return;
+            }
             setState(summaryInProgress ? "summarizing" : "idle");
         }
     });
@@ -131,6 +159,7 @@ public class MainActivity extends Activity {
             .build();
     private final MicStreamer mic = new MicStreamer();
     private final PcmPlayer player = new PcmPlayer(TAG);
+    private GatewayTtsPlayer ttsPlayer;
     private HeadsetBindingManager headsets;
     private MemoryStore memoryStore;
     private AgentApiClient agents;
@@ -144,6 +173,7 @@ public class MainActivity extends Activity {
     private String selectedVoiceId = DEFAULT_VOICE;
     private String selectedVoiceLabel = "Doris Clone";
     private String agentName = SYSTEM_AGENT_NAME;
+    private String initAgentNameCandidates = AGENT_NAME_CANDIDATES;
     private String userName = "";
     private String userMemory = "";
     private String agentMemory = "";
@@ -155,6 +185,7 @@ public class MainActivity extends Activity {
     private boolean initializing = false;
     private boolean initPromptPending = false;
     private boolean initSummaryPending = false;
+    private boolean initOpeningDelivered = false;
     private boolean summaryInProgress = false;
     private boolean ignoreNextInitTrigger = false;
     private int realtimeRetryCount = 0;
@@ -166,6 +197,10 @@ public class MainActivity extends Activity {
     private boolean pendingRealtimeNewsAnswer = false;
     private boolean pendingNewsToolAfterAck = false;
     private boolean discardRealtimeAudioUntilDone = false;
+    private boolean realtimeOutputActive = false;
+    private boolean waitingForRealtimeStopBeforeToolTts = false;
+    private boolean toolTtsPlaybackActive = false;
+    private boolean demoMode = false;
     private boolean pendingWeatherRealtime = false;
     private boolean compactInProgress = false;
     private boolean memoryDirtyForRealtime = false;
@@ -181,6 +216,8 @@ public class MainActivity extends Activity {
     private String pendingNewsQuestion = null;
     private String pendingWeatherBroadcastPrompt = null;
     private String pendingNewsBroadcastPrompt = null;
+    private String pendingToolTtsId = null;
+    private String pendingToolTtsText = null;
     private String activeAssistantId = null;
     private WeatherTool.WeatherResult latestVoiceWeather = null;
     private NewsTool.NewsResult latestVoiceNews = null;
@@ -202,6 +239,8 @@ public class MainActivity extends Activity {
     private Runnable voiceWeatherTimeout;
     private Runnable voiceNewsTimeout;
     private Runnable conversationLockTimeout;
+    private Runnable responsePendingTimeout;
+    private Runnable asrFinalTimeout;
     private boolean conversationOverLockscreen = false;
     private PowerManager.WakeLock replyWakeLock;
     private ValueAnimator replyBrightnessAnimator;
@@ -224,6 +263,9 @@ public class MainActivity extends Activity {
         agents = new AgentApiClient(llmHttp, main);
         weatherTool = new WeatherTool(llmHttp, main);
         newsTool = new NewsTool(llmHttp, main);
+        ttsPlayer = new GatewayTtsPlayer(TAG, llmHttp, main, getCacheDir(),
+                BuildConfig.AGENTLLM_BASE_URL, BuildConfig.AGENTLLM_API_KEY,
+                "doubao-tts", DEFAULT_VOICE);
         voices.add(new Voice(DEFAULT_VOICE, "Doris Clone", "female"));
         voices.add(new Voice("zh_female_roumeinvyou_emo_v2_mars_bigtts", "柔美女友（多情感）", "female"));
         voices.add(new Voice("zh_female_gaolengyujie_emo_v2_mars_bigtts", "高冷御姐（多情感）", "female"));
@@ -231,14 +273,18 @@ public class MainActivity extends Activity {
         SharedPreferences prefs = getSharedPreferences("her", MODE_PRIVATE);
         headsets = new HeadsetBindingManager(this, prefs, this::onHeadsetDevicesChanged);
         headsets.start();
+        demoMode = prefs.getBoolean(PREF_DEMO_MODE, false);
         setupHeadsetMediaSession();
         memoryStore = new MemoryStore(this);
-        agentName = SYSTEM_AGENT_NAME;
-        prefs.edit().putString("agent_name", SYSTEM_AGENT_NAME).apply();
+        agentName = prefs.getString("agent_name", SYSTEM_AGENT_NAME);
         userName = prefs.getString("user_name", "");
         userMemory = readUserMemory();
         agentMemory = readAgentMemory();
         initialized = !userMemory.trim().isEmpty();
+        if (initialized && (agentName == null || agentName.trim().isEmpty())) {
+            agentName = extractAgentName(agentMemory);
+            if (agentName.trim().isEmpty()) agentName = SYSTEM_AGENT_NAME;
+        }
         if (userName.trim().isEmpty()) userName = extractUserName(userMemory);
         sessionId = memoryStore.startSession(agentName);
         conversationMemory = memoryStore.relevantMemory("");
@@ -250,7 +296,7 @@ public class MainActivity extends Activity {
         if (initialized) {
             showHome();
         } else {
-            beginInitialization(agentName);
+            beginInitialization("");
         }
         loadVoices();
         handleVoiceCommandIntent(getIntent());
@@ -263,6 +309,8 @@ public class MainActivity extends Activity {
         if (voiceWeatherTimeout != null) main.removeCallbacks(voiceWeatherTimeout);
         if (voiceNewsTimeout != null) main.removeCallbacks(voiceNewsTimeout);
         if (conversationLockTimeout != null) main.removeCallbacks(conversationLockTimeout);
+        if (responsePendingTimeout != null) main.removeCallbacks(responsePendingTimeout);
+        if (asrFinalTimeout != null) main.removeCallbacks(asrFinalTimeout);
         clearConversationOverLockscreen();
         restoreReplyScreenBrightness();
         releaseReplyWakeLock();
@@ -270,6 +318,8 @@ public class MainActivity extends Activity {
         if (headsets != null) headsets.stop();
         mic.stop();
         player.stop();
+        stopOpeningTts();
+        clearInteractionKeepScreenOn();
         realtime.close();
         if (memoryStore != null) memoryStore.close();
         super.onDestroy();
@@ -300,7 +350,7 @@ public class MainActivity extends Activity {
         } else if (initializing) {
             showInitializationHome();
         } else {
-            beginInitialization(agentName);
+            beginInitialization("");
         }
         main.postDelayed(() -> {
             if (isBoundHeadsetConnected()) {
@@ -369,8 +419,7 @@ public class MainActivity extends Activity {
             realtime.connect();
             return;
         }
-        player.stop();
-        realtime.sendEvent("input_audio.interrupt", json("reason", "assistant_launch"));
+        interruptRealtimePlayback("assistant_launch");
         startInputAudio();
     }
 
@@ -448,8 +497,8 @@ public class MainActivity extends Activity {
     private void interruptCurrentConversationFromHeadset() {
         Log.d(TAG, "headset double tap interrupt");
         markConversationInteraction(false);
-        discardRealtimeAudioUntilDone = true;
-        player.stop();
+        interruptRealtimePlayback("headset_double_tap");
+        stopToolTtsPlayback(true);
         persistActiveAssistantMessage();
         activeAssistantId = null;
         pendingWeatherBroadcastPrompt = null;
@@ -458,9 +507,6 @@ public class MainActivity extends Activity {
         pendingNewsToolAfterAck = false;
         pendingRealtimeWeatherAnswer = false;
         pendingRealtimeNewsAnswer = false;
-        if (realtime.isOpen()) {
-            realtime.sendEvent("input_audio.interrupt", json("reason", "headset_double_tap"));
-        }
         if (mic.running || inputAudioOpen) {
             stopInputAudio("ready");
         } else {
@@ -568,7 +614,26 @@ public class MainActivity extends Activity {
         micButton = views.micButton;
         setContentView(root);
         updateVoiceHome();
-        if (isBoundHeadsetConnected() && !realtime.isOpen()) realtime.connect();
+        autoStartListeningOnVoiceSurface();
+    }
+
+    private void autoStartListeningOnVoiceSurface() {
+        if (!initialized || initializing || summaryInProgress) return;
+        if (hasActiveToolTtsPlayback()) return;
+        if (mic.running || inputAudioOpen) return;
+        if (!isBoundHeadsetConnected()) return;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingMicStart = true;
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            return;
+        }
+        pendingMicStart = true;
+        if (realtime.isOpen()) {
+            pendingMicStart = false;
+            startInputAudio();
+        } else {
+            realtime.connect();
+        }
     }
 
     private String displayUserName() {
@@ -583,7 +648,262 @@ public class MainActivity extends Activity {
             if (trimmed.contains("用户姓名") || trimmed.contains("称呼") || trimmed.toLowerCase(Locale.US).contains("user_name")) {
                 int colon = Math.max(trimmed.indexOf(':'), trimmed.indexOf('：'));
                 if (colon >= 0 && colon + 1 < trimmed.length()) {
-                    String value = trimmed.substring(colon + 1).replace("*", "").replace("-", "").trim();
+                    String value = normalizeProfileCandidate(trimmed.substring(colon + 1));
+                    if (isUsableProfileValue(value)) return value;
+                }
+            }
+        }
+        return "";
+    }
+
+    private String inferUserNameFromTranscript(String transcript) {
+        if (transcript == null) return "";
+        String[] lines = transcript.split("\\n");
+        String lastAssistant = "";
+        for (String line : lines) {
+            if (line.startsWith("assistant:")) {
+                lastAssistant = line.substring(10).trim();
+                continue;
+            }
+            if (!line.startsWith("user:")) continue;
+            String text = line.substring(5).trim();
+            String[] patterns = {
+                    "我叫", "我是", "你可以叫我", "叫我", "称呼我为", "称呼我"
+            };
+            for (String pattern : patterns) {
+                int index = text.indexOf(pattern);
+                if (index < 0) continue;
+                String value = normalizeProfileCandidate(text.substring(index + pattern.length()));
+                if (isUsableProfileValue(value)) return value;
+            }
+            if (asksForUserName(lastAssistant)) {
+                String value = normalizeProfileCandidate(text);
+                if (isUsableProfileValue(value)) return value;
+            }
+        }
+        return "";
+    }
+
+    private String inferAgentNameFromTranscript(String transcript) {
+        if (transcript == null) return "";
+        String[] lines = transcript.split("\\n");
+        for (String line : lines) {
+            if (!line.startsWith("assistant:")) continue;
+            String text = line.substring(10).trim();
+            String[] patterns = {"名字叫", "我叫", "我是"};
+            for (String pattern : patterns) {
+                int index = text.indexOf(pattern);
+                if (index < 0) continue;
+                String value = normalizeProfileCandidate(text.substring(index + pattern.length()));
+                value = cleanAgentName(value, true);
+                if (!value.isEmpty()) return value;
+            }
+        }
+        return "";
+    }
+
+    private String shuffledAgentNameCandidates() {
+        List<String> names = new ArrayList<>();
+        for (String name : AGENT_NAME_CANDIDATE_NAMES) names.add(name);
+        for (int i = names.size() - 1; i > 0; i--) {
+            int j = random.nextInt(i + 1);
+            String tmp = names.get(i);
+            names.set(i, names.get(j));
+            names.set(j, tmp);
+        }
+        StringBuilder builder = new StringBuilder();
+        for (String name : names) {
+            if (builder.length() > 0) builder.append('、');
+            builder.append(name);
+        }
+        return builder.toString();
+    }
+
+    private String randomAgentNameCandidate() {
+        return AGENT_NAME_CANDIDATE_NAMES[random.nextInt(AGENT_NAME_CANDIDATE_NAMES.length)];
+    }
+
+    private boolean asksForUserName(String text) {
+        if (text == null) return false;
+        return text.contains("叫什么") || text.contains("怎么称呼") ||
+                text.contains("称呼你") || text.contains("你的名字") ||
+                text.contains("你叫什么");
+    }
+
+    private boolean asksForRelationship(String text) {
+        if (text == null) return false;
+        return text.contains("什么样的关系") ||
+                (text.contains("希望和我") && text.contains("关系")) ||
+                (text.contains("希望我") && text.contains("关系")) ||
+                text.contains("建立什么关系") || text.contains("我们是什么关系");
+    }
+
+    private boolean asksForStory(String text) {
+        if (text == null) return false;
+        return text.contains("你的故事") || text.contains("讲讲你") ||
+                text.contains("讲讲自己") || text.contains("最近在忙") ||
+                text.contains("在意的事") || text.contains("希望我记住");
+    }
+
+    private String normalizeShortReply(String text) {
+        if (text == null) return "";
+        return text.trim()
+                .replace("。", "")
+                .replace("，", "")
+                .replace(",", "")
+                .replace(".", "")
+                .replace("！", "")
+                .replace("!", "")
+                .replace("？", "")
+                .replace("?", "")
+                .replace("~", "")
+                .replace("～", "")
+                .trim();
+    }
+
+    private boolean isShortConfirmation(String text) {
+        String normalized = normalizeShortReply(text).toLowerCase(Locale.US);
+        return normalized.equals("可以") || normalized.equals("可以呀") ||
+                normalized.equals("可以啊") || normalized.equals("好") ||
+                normalized.equals("好的") || normalized.equals("嗯") ||
+                normalized.equals("嗯嗯") || normalized.equals("对") ||
+                normalized.equals("是的") || normalized.equals("行") ||
+                normalized.equals("没问题") || normalized.equals("ok") ||
+                normalized.equals("yes");
+    }
+
+    private boolean hasNameCue(String text) {
+        if (text == null) return false;
+        return text.contains("我叫") || text.contains("我是") ||
+                text.contains("你可以叫我") || text.contains("叫我") ||
+                text.contains("称呼我");
+    }
+
+    private String relationshipFromText(String text) {
+        if (text == null) return "";
+        if (text.contains("女朋友") || text.contains("恋人") || text.contains("情侣")) return "女朋友";
+        if (text.contains("男朋友")) return "男朋友";
+        if (text.contains("朋友")) return "朋友";
+        if (text.contains("助理") || text.contains("助手")) return "朋友和助理";
+        return "";
+    }
+
+    private boolean isLikelyStoryAnswer(String text) {
+        String normalized = normalizeShortReply(text);
+        if (normalized.length() < 6) return false;
+        if (isShortConfirmation(text)) return false;
+        if (normalized.length() <= 12 && isUsableProfileValue(relationshipFromText(text))) return false;
+        return true;
+    }
+
+    private String lastAssistantBeforeLatestUser() {
+        boolean seenLatestUser = false;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Message message = messages.get(i);
+            if (!seenLatestUser) {
+                if ("user".equals(message.role)) seenLatestUser = true;
+                continue;
+            }
+            if ("assistant".equals(message.role) && message.text != null) {
+                return message.text.trim();
+            }
+        }
+        return "";
+    }
+
+    private boolean recordInitializationAnswer(String text) {
+        if (isInitializationSmallTalk(text) || isShortConfirmation(text)) return false;
+        String lastAssistant = lastAssistantBeforeLatestUser();
+        boolean advanced = false;
+        if (initUserTurns <= 0) {
+            if (asksForUserName(lastAssistant) || hasNameCue(text)) {
+                initUserTurns = 1;
+                advanced = true;
+            }
+        } else if (initUserTurns == 1) {
+            if (asksForRelationship(lastAssistant) || isUsableProfileValue(relationshipFromText(text))) {
+                initUserTurns = 2;
+                advanced = true;
+            }
+        } else if (initUserTurns == 2) {
+            if (asksForStory(lastAssistant) || isLikelyStoryAnswer(text)) {
+                initUserTurns = 3;
+                advanced = true;
+            }
+        }
+        if (advanced) updateInitProgress();
+        return advanced;
+    }
+
+    private boolean isInitializationSmallTalk(String text) {
+        if (text == null) return true;
+        String normalized = normalizeShortReply(text);
+        return normalized.equals("你好") || normalized.equals("哈喽") ||
+                normalized.equals("hello") || normalized.equalsIgnoreCase("hi") ||
+                normalized.equals("在吗") || normalized.equals("喂");
+    }
+
+    private String normalizeProfileCandidate(String value) {
+        if (value == null) return "";
+        String result = value.replace("*", "")
+                .replace("-", "")
+                .replace("就行", "")
+                .replace("吧", "")
+                .trim();
+        result = result.replaceFirst("^(啊|嗯|呃|哦|噢|唔|那个|我的名字是|我叫|我是|你可以叫我|叫我|称呼我为|称呼我)\\s*", "");
+        result = result.replaceFirst("^[\\s，,。.!！?？、：:；;]+", "");
+        String[] stops = {"。", "，", ",", ".", "？", "?", "！", "!", "、", "；", ";", "：", ":", "\n"};
+        for (String stop : stops) {
+            int index = result.indexOf(stop);
+            if (index > 0) result = result.substring(0, index).trim();
+        }
+        int space = result.indexOf(' ');
+        if (space > 0) result = result.substring(0, space).trim();
+        return result.trim();
+    }
+
+    private String inferRelationshipFromTranscript(String transcript) {
+        if (transcript == null) return "";
+        String[] lines = transcript.split("\\n");
+        for (String line : lines) {
+            if (!line.startsWith("user:")) continue;
+            String relationship = relationshipFromText(line.substring(5).trim());
+            if (isUsableProfileValue(relationship)) return relationship;
+        }
+        return "";
+    }
+
+    private boolean isUsableProfileValue(String value) {
+        if (value == null) return false;
+        String trimmed = value.trim();
+        String lower = trimmed.toLowerCase(Locale.US);
+        return !trimmed.isEmpty()
+                && trimmed.length() <= 20
+                && !trimmed.contains("未明确")
+                && !trimmed.contains("不知道")
+                && !trimmed.contains("没有")
+                && !trimmed.equals("你好")
+                && !trimmed.equals("哈喽")
+                && !trimmed.equals("在吗")
+                && !lower.equals("there")
+                && !lower.equals("hi")
+                && !lower.equals("hello");
+    }
+
+    private String extractAgentName(String markdown) {
+        if (markdown == null) return "";
+        String[] lines = markdown.split("\\n");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            String lower = trimmed.toLowerCase(Locale.US);
+            if (lower.contains("agent name") || trimmed.contains("Agent 名字") ||
+                    trimmed.contains("名字") || trimmed.contains("名称")) {
+                int colon = Math.max(trimmed.indexOf(':'), trimmed.indexOf('：'));
+                if (colon >= 0 && colon + 1 < trimmed.length()) {
+                    String value = trimmed.substring(colon + 1)
+                            .replace("*", "")
+                            .replace("-", "")
+                            .trim();
                     if (!value.isEmpty() && !value.contains("未明确")) return value;
                 }
             }
@@ -591,8 +911,42 @@ public class MainActivity extends Activity {
         return "";
     }
 
+    private String cleanAgentName(String value, boolean selfNamed) {
+        if (value == null) return "";
+        String name = value.trim()
+                .replace("。", "")
+                .replace("，", "")
+                .replace(",", "")
+                .replace(".", "")
+                .replace("\"", "")
+                .replace("“", "")
+                .replace("”", "")
+                .trim();
+        if (name.contains(" ")) name = name.substring(0, name.indexOf(' ')).trim();
+        if (!isAcceptableAgentName(name, selfNamed)) return "";
+        return name;
+    }
+
+    private boolean isAcceptableAgentName(String name, boolean selfNamed) {
+        if (name == null || name.trim().isEmpty() || name.length() > 16) return false;
+        String lower = name.toLowerCase(Locale.US);
+        if (name.contains("豆包") || name.contains("小包") || name.contains("包包") ||
+                name.contains("助手") || name.contains("助理") || name.contains("智能") ||
+                name.contains("机器人") || name.contains("AI") || lower.contains("bot") ||
+                lower.contains("assistant")) return false;
+        return !selfNamed || !SYSTEM_AGENT_NAME.equals(name);
+    }
+
+    private String fallbackAgentName() {
+        return randomAgentNameCandidate();
+    }
+
+    private String effectiveAgentName() {
+        return agentName == null || agentName.trim().isEmpty() ? SYSTEM_AGENT_NAME : agentName.trim();
+    }
+
     private void animateAgentName() {
-        final String value = agentName == null || agentName.trim().isEmpty() ? SYSTEM_AGENT_NAME : agentName.trim();
+        final String value = effectiveAgentName();
         final long started = SystemClock.uptimeMillis();
         main.post(new Runnable() {
             @Override public void run() {
@@ -627,9 +981,13 @@ public class MainActivity extends Activity {
         deleteFile(USER_MEMORY_FILE);
         deleteFile(AGENT_MEMORY_FILE);
         if (memoryStore != null) memoryStore.resetAll();
-        sessionId = memoryStore == null ? -1 : memoryStore.startSession(agentName);
+        agentName = "";
+        sessionId = memoryStore == null ? -1 : memoryStore.startSession("initializing");
         persistedMessageIds.clear();
-        getSharedPreferences("her", MODE_PRIVATE).edit().remove("user_name").apply();
+        getSharedPreferences("her", MODE_PRIVATE).edit()
+                .remove("user_name")
+                .remove("agent_name")
+                .apply();
         userName = "";
         userMemory = "";
         agentMemory = "";
@@ -660,7 +1018,7 @@ public class MainActivity extends Activity {
         activeAssistantId = null;
         messages.clear();
         setState("idle");
-        beginInitialization(agentName);
+        beginInitialization("");
     }
 
     private void showInitialize() {
@@ -669,7 +1027,6 @@ public class MainActivity extends Activity {
         homeTimeView = null;
         InitializationPage.Views views = InitializationPage.renderSetup(this, ui, agentName, this::showSettings, name -> {
             String value = name.trim();
-            if (value.isEmpty()) value = SYSTEM_AGENT_NAME;
             beginInitialization(value);
         });
         root = views.root;
@@ -678,16 +1035,22 @@ public class MainActivity extends Activity {
     }
 
     private void beginInitialization(String name) {
-        agentName = SYSTEM_AGENT_NAME;
-        getSharedPreferences("her", MODE_PRIVATE).edit().putString("agent_name", SYSTEM_AGENT_NAME).apply();
+        agentName = name == null ? "" : name.trim();
+        initAgentNameCandidates = shuffledAgentNameCandidates();
+        Log.d(TAG, "init agent name candidates: " + initAgentNameCandidates);
+        SharedPreferences.Editor prefs = getSharedPreferences("her", MODE_PRIVATE).edit();
+        if (agentName.isEmpty()) prefs.remove("agent_name");
+        else prefs.putString("agent_name", agentName);
+        prefs.apply();
         if (memoryStore != null) {
-            sessionId = memoryStore.startSession(agentName);
+            sessionId = memoryStore.startSession(agentName.isEmpty() ? "initializing" : agentName);
             persistedMessageIds.clear();
         }
         initializing = true;
         initialized = false;
         initPromptPending = true;
         initSummaryPending = false;
+        initOpeningDelivered = false;
         summaryInProgress = false;
         ignoreNextInitTrigger = true;
         realtimeRetryCount = 0;
@@ -695,13 +1058,102 @@ public class MainActivity extends Activity {
         activeAssistantId = null;
         messages.clear();
         if (!isBoundHeadsetConnected()) {
-            messages.add(new Message("init-text-only", "assistant",
-                    "我是 Doris。先用文字也可以。你希望我怎么称呼你？"));
             setState("text_only");
         }
-        showInitializationHome();
         realtime.close();
-        if (isBoundHeadsetConnected()) realtime.connect();
+        showInitializationHome();
+        deliverInitializationOpening();
+    }
+
+    private void deliverInitializationOpening() {
+        if (!initializing || initOpeningDelivered) return;
+        ensureInitializationAgentName();
+        deliverTtsInitializationOpening();
+    }
+
+    private void ensureInitializationAgentName() {
+        String name = agentName == null ? "" : agentName.trim();
+        if (!name.isEmpty()) return;
+        agentName = randomAgentNameCandidate();
+        Log.d(TAG, "init fallback selected agent name: " + agentName);
+        getSharedPreferences("her", MODE_PRIVATE).edit()
+                .putString("agent_name", agentName)
+                .apply();
+        if (memoryStore != null && sessionId > 0) {
+            memoryStore.updateSessionAgentName(sessionId, agentName);
+        }
+    }
+
+    private void deliverTtsInitializationOpening() {
+        if (!initializing || initOpeningDelivered) return;
+        initOpeningDelivered = true;
+        String name = agentName == null || agentName.trim().isEmpty() ? randomAgentNameCandidate() : agentName.trim();
+        String opening = "嗨，我是 " + name + "。我们先从你开始吧：你叫什么名字，平时希望我怎么称呼你？";
+        Log.d(TAG, "init tts opening: " + opening);
+        updateInitProgress();
+        updateVoiceHome();
+        speakOpeningWithGatewayTts(opening);
+    }
+
+    private void speakOpeningWithGatewayTts(String text) {
+        if (text == null || text.trim().isEmpty()) return;
+        ttsPlayer.play("init-opening", text, new GatewayTtsPlayer.Listener() {
+            @Override public void onStarted(String id, String spokenText) {
+                showInitializationOpeningSubtitle(spokenText);
+            }
+
+            @Override public void onCompleted(String id) {
+                startRealtimeListeningAfterOpening();
+            }
+
+            @Override public void onError(String id, String message) {
+                Log.d(TAG, "init tts failed: " + message);
+                showInitializationOpeningSubtitle(text);
+                startRealtimeListeningAfterOpening();
+            }
+        });
+    }
+
+    private void showInitializationOpeningSubtitle(String opening) {
+        if (!initializing) return;
+        if (opening != null && !opening.trim().isEmpty() && !hasMessage("init-opening")) {
+            messages.add(new Message("init-opening", "assistant", opening));
+        }
+        updateInitProgress();
+        renderMessages();
+        updateVoiceHome();
+    }
+
+    private boolean hasMessage(String id) {
+        for (Message message : messages) {
+            if (id.equals(message.id)) return true;
+        }
+        return false;
+    }
+
+    private void startRealtimeListeningAfterOpening() {
+        if (!initializing || summaryInProgress) return;
+        if (!isBoundHeadsetConnected()) {
+            setState("text_only");
+            showHeadsetPrompt(true);
+            return;
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingMicStart = true;
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            return;
+        }
+        pendingMicStart = true;
+        if (!realtime.isOpen()) {
+            realtime.connect();
+        } else {
+            pendingMicStart = false;
+            startInputAudio();
+        }
+    }
+
+    private void stopOpeningTts() {
+        if (ttsPlayer != null) ttsPlayer.stop();
     }
 
     private void showInitializationHome() {
@@ -808,7 +1260,8 @@ public class MainActivity extends Activity {
         LinearLayout list = screenList();
         list.addView(navRow("↺", "Reinitialize", "Reset memory", this::resetInitialization));
         list.addView(navRow("⌫", "Clear Session", "Keep memory", this::clearCurrentSession));
-        list.addView(navRow("🎧", "Headphones", headsetSettingsLabel(), () -> showHeadsetPrompt(false)));
+        list.addView(navRow("▣", "演示模式", demoMode ? "On · 本机麦克风与 Speaker" : "Off", this::showDemoModePrompt));
+        list.addView(ui.navRow(R.drawable.ic_headphones, "Headphones", headsetSettingsLabel(), () -> showHeadsetPrompt(false)));
         list.addView(navRow("≋", "Voice", selectedVoiceLabel, this::showVoices));
         list.addView(navRow("♬", "Sound", "76%", null));
         list.addView(navRow("♧", "Notifications", "On", null));
@@ -820,10 +1273,37 @@ public class MainActivity extends Activity {
     }
 
     private String headsetSettingsLabel() {
+        if (demoMode) return "Skipped in demo mode";
         if (headsets == null || !headsets.hasBoundHeadset()) return "Not bound";
         String label = headsets.boundLabel();
         if (label.isEmpty()) label = "Bound";
         return headsets.isBoundConnected() ? label : label + " · offline";
+    }
+
+    private void showDemoModePrompt() {
+        new AlertDialog.Builder(this)
+                .setTitle("演示模式")
+                .setMessage(demoMode
+                        ? "当前正在使用本机麦克风和 Speaker。关闭后，语音模式会重新要求已绑定耳机在线。"
+                        : "开启后，不需要绑定耳机；语音会直接使用本机麦克风和 Speaker。适合演示或调试。")
+                .setPositiveButton(demoMode ? "关闭演示模式" : "开启演示模式", (dialog, which) -> setDemoMode(!demoMode))
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void setDemoMode(boolean enabled) {
+        if (demoMode == enabled) return;
+        demoMode = enabled;
+        getSharedPreferences("her", MODE_PRIVATE).edit().putBoolean(PREF_DEMO_MODE, demoMode).apply();
+        if (!demoMode && !isBoundHeadsetConnected() && (mic.running || inputAudioOpen)) {
+            stopInputAudio("text_only");
+            toastError("演示模式已关闭，语音需要已绑定耳机在线。");
+        } else {
+            if (stateLabel != null) stateLabel.setText(stateLabelText());
+            if (micButton != null) micButton.setText(mic.running || inputAudioOpen ? "●" : voiceButtonText());
+            if (demoMode && (initialized || initializing) && !realtime.isOpen()) realtime.connect();
+        }
+        showSettings();
     }
 
     private void clearCurrentSession() {
@@ -962,7 +1442,7 @@ public class MainActivity extends Activity {
                 return message.text.trim();
             }
         }
-        return "我在这里，马上开始认识你。";
+        return "初始化";
     }
 
     private void updateInitializationLastTurn() {
@@ -1135,12 +1615,12 @@ public class MainActivity extends Activity {
         markConversationInteraction(false);
         addChatMessage("user", text);
         if (initializing) {
-            initUserTurns++;
-            updateInitProgress();
-            if (initUserTurns >= INIT_TARGET_USER_TURNS) {
-                renderMessages();
-                finishInitializationWithSummary();
-                return;
+            if (recordInitializationAnswer(text)) {
+                if (initUserTurns >= INIT_TARGET_USER_TURNS) {
+                    renderMessages();
+                    finishInitializationWithSummary();
+                    return;
+                }
             }
             scheduleInitializationContextUpdate();
         }
@@ -1185,7 +1665,7 @@ public class MainActivity extends Activity {
             JSONObject system = new JSONObject();
             system.put("role", "system");
             system.put("content",
-                    "你是 Doris 的后台意识模型，负责判断用户当前这句话是否需要客户端工具。\n" +
+                    "你是 " + effectiveAgentName() + " 的后台意识模型，负责判断用户当前这句话是否需要客户端工具。\n" +
                     "当前可用工具：daily_news（读取每日新闻热点，来源 https://agentnews.linkyun.co/）。\n" +
                     "如果用户想查、看、听、播报新闻/热点/每日新闻热点，返回 {\"tool\":\"daily_news\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
                     "如果只是普通聊天、评价刚才内容、追问旧回答、闲聊或不确定，返回 {\"tool\":\"none\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
@@ -1235,12 +1715,10 @@ public class MainActivity extends Activity {
         latestWeatherFact = "";
         pendingRealtimeWeatherAnswer = false;
         pendingWeatherBroadcastPrompt = null;
-        discardRealtimeAudioUntilDone = true;
-        player.stop();
+        interruptRealtimePlayback("background_tool_daily_news");
         discardActiveAssistantMessage();
         removeAssistantReplyAfterLastUser();
         if (realtime.isOpen()) {
-            realtime.sendEvent("input_audio.interrupt", json("reason", "background_tool_daily_news"));
             realtime.close();
         }
         setState("news_tool");
@@ -1251,14 +1729,13 @@ public class MainActivity extends Activity {
         pendingNewsQuestion = question;
         pendingNewsToolAfterAck = true;
         toolRouteSeq++;
-        player.stop();
+        interruptRealtimePlayback("news_tool_ack", false);
         activeAssistantId = null;
         setState("news_ack");
         if (!realtime.isOpen()) {
             realtime.connect();
             return;
         }
-        realtime.sendEvent("input_audio.interrupt", json("reason", "news_tool_ack"));
         realtime.sendInputText(NewsSkill.LOOKUP_ACK_PROMPT);
     }
 
@@ -1267,6 +1744,7 @@ public class MainActivity extends Activity {
         pendingNewsToolAfterAck = false;
         toolRouteSeq++;
         String question = pendingNewsQuestion == null ? "每日新闻热点" : pendingNewsQuestion;
+        Log.d(TAG, "news ack done, run tool question=" + question);
         realtime.close();
         discardRealtimeAudioUntilDone = false;
         player.stop();
@@ -1276,6 +1754,7 @@ public class MainActivity extends Activity {
 
     private void runNewsTool(String question, boolean realtimeMode) {
         if (newsTool == null) return;
+        Log.d(TAG, "news tool fetch realtime=" + realtimeMode + " question=" + question);
         newsTool.fetchDaily(newsCallback(question, realtimeMode));
     }
 
@@ -1283,12 +1762,17 @@ public class MainActivity extends Activity {
         return new NewsTool.CallbackResult() {
             @Override public void onSuccess(NewsTool.NewsResult result) {
                 String fact = result.fact(question);
+                Log.d(TAG, "news tool success items=" + result.items.size() + " realtime=" + realtimeMode);
                 latestNewsFact = fact;
-                addNewsCard(result);
                 if (realtimeMode) {
-                    pendingRealtimeNewsAnswer = true;
-                    queueRealtimeNewsBroadcast(NewsSkill.SUCCESS_BROADCAST_PROMPT);
+                    pendingRealtimeNewsAnswer = false;
+                    addNewsCard(result);
+                    String answer = result.shortAnswer();
+                    addChatMessage("assistant", answer);
+                    renderMessages();
+                    queueToolTtsPlayback("news", answer);
                 } else {
+                    addNewsCard(result);
                     addChatMessage("assistant", result.shortAnswer());
                     renderMessages();
                     setState("ready");
@@ -1296,10 +1780,14 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onError(String message) {
+                Log.d(TAG, "news tool error realtime=" + realtimeMode + " message=" + message);
                 if (realtimeMode) {
                     latestNewsFact = NewsSkill.failureFact(message);
-                    pendingRealtimeNewsAnswer = true;
-                    queueRealtimeNewsBroadcast(NewsSkill.FAILURE_BROADCAST_PROMPT);
+                    pendingRealtimeNewsAnswer = false;
+                    String answer = "暂时没读到新闻热点，" + message + "。你可以稍后再试一下。";
+                    addChatMessage("assistant", answer);
+                    renderMessages();
+                    queueToolTtsPlayback("news", answer);
                 } else {
                     addChatMessage("assistant", message);
                     renderMessages();
@@ -1312,12 +1800,19 @@ public class MainActivity extends Activity {
     private boolean handleWeatherQuestion(String text, boolean realtimeMode) {
         if (!WeatherSkill.isWeatherQuestion(text)) return false;
         String city = WeatherSkill.extractCity(text);
+        Log.d(TAG, "weather intent hit realtime=" + realtimeMode + " city=" + city + " text=" + text);
         latestWeatherFact = "";
         pendingRealtimeWeatherAnswer = false;
         pendingWeatherBroadcastPrompt = null;
         pendingRealtimeNewsAnswer = false;
         latestNewsFact = "";
         if (!realtimeMode) {
+            addChatMessage("assistant", "稍等，我查一下天气。");
+            renderMessages();
+        } else {
+            interruptRealtimePlayback("weather_tool");
+            discardActiveAssistantMessage();
+            removeAssistantReplyAfterLastUser();
             addChatMessage("assistant", "稍等，我查一下天气。");
             renderMessages();
         }
@@ -1328,9 +1823,11 @@ public class MainActivity extends Activity {
     private void runWeatherTool(String question, String city, boolean realtimeMode) {
         if (weatherTool == null) return;
         if (city != null && !city.trim().isEmpty()) {
+            Log.d(TAG, "weather query city=" + city.trim() + " realtime=" + realtimeMode);
             weatherTool.queryCity(city.trim(), weatherCallback(question, realtimeMode));
             return;
         }
+        Log.d(TAG, "weather query current location realtime=" + realtimeMode);
         requestWeatherForCurrentLocation(question, realtimeMode);
     }
 
@@ -1338,11 +1835,15 @@ public class MainActivity extends Activity {
         return new WeatherTool.CallbackResult() {
             @Override public void onSuccess(WeatherTool.WeatherResult result) {
                 String fact = result.fact(question);
+                Log.d(TAG, "weather success place=" + result.placeName + " realtime=" + realtimeMode);
                 latestWeatherFact = fact;
                 addWeatherCard(result);
                 if (realtimeMode) {
-                    pendingRealtimeWeatherAnswer = true;
-                    queueRealtimeWeatherBroadcast(WeatherSkill.SUCCESS_BROADCAST_PROMPT);
+                    pendingRealtimeWeatherAnswer = false;
+                    String answer = result.shortAnswer();
+                    addChatMessage("assistant", answer);
+                    renderMessages();
+                    queueToolTtsPlayback("weather", answer);
                 } else {
                     addChatMessage("assistant", result.shortAnswer());
                     renderMessages();
@@ -1351,10 +1852,14 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onError(String message) {
+                Log.d(TAG, "weather error realtime=" + realtimeMode + " message=" + message);
                 if (realtimeMode) {
                     latestWeatherFact = WeatherSkill.failureFact(message);
-                    pendingRealtimeWeatherAnswer = true;
-                    queueRealtimeWeatherBroadcast(WeatherSkill.FAILURE_BROADCAST_PROMPT);
+                    pendingRealtimeWeatherAnswer = false;
+                    String answer = "暂时没查到天气，" + message + "。你可以稍后再试，或者告诉我具体城市。";
+                    addChatMessage("assistant", answer);
+                    renderMessages();
+                    queueToolTtsPlayback("weather", answer);
                 } else {
                     addChatMessage("assistant", message);
                     renderMessages();
@@ -1406,7 +1911,7 @@ public class MainActivity extends Activity {
     private void queueRealtimeWeatherBroadcast(String prompt) {
         pendingWeatherBroadcastPrompt = prompt;
         pushRealtimeWeatherFact();
-        if (!"speaking".equals(state) && !"thinking".equals(state)) {
+        if (!"speaking".equals(state) && !isResponsePendingState(state)) {
             schedulePendingWeatherBroadcast(1000);
         }
     }
@@ -1425,7 +1930,7 @@ public class MainActivity extends Activity {
         String prompt = pendingWeatherBroadcastPrompt;
         pendingWeatherBroadcastPrompt = null;
         realtime.sendInputText(prompt);
-        setState("thinking");
+        setState("processing");
     }
 
     private void pushRealtimeNewsFact() {
@@ -1441,7 +1946,7 @@ public class MainActivity extends Activity {
         pendingNewsBroadcastPrompt = prompt;
         toolRouteSeq++;
         pushRealtimeNewsFact();
-        if (!"speaking".equals(state) && !"thinking".equals(state)) {
+        if (!"speaking".equals(state) && !isResponsePendingState(state)) {
             schedulePendingNewsBroadcast(1000);
         }
     }
@@ -1453,7 +1958,7 @@ public class MainActivity extends Activity {
     private void sendPendingNewsBroadcast() {
         if (pendingNewsBroadcastPrompt == null) return;
         Log.d(TAG, "send pending news broadcast state=" + state);
-        if ("speaking".equals(state) || "thinking".equals(state)) {
+        if ("speaking".equals(state) || isResponsePendingState(state)) {
             schedulePendingNewsBroadcast(600);
             return;
         }
@@ -1466,7 +1971,142 @@ public class MainActivity extends Activity {
         String prompt = pendingNewsBroadcastPrompt;
         pendingNewsBroadcastPrompt = null;
         realtime.sendInputText(prompt);
-        setState("thinking");
+        setState("processing");
+    }
+
+    private void queueToolTtsPlayback(String source, String text) {
+        if (text == null || text.trim().isEmpty()) return;
+        pendingToolTtsId = source + "-" + System.currentTimeMillis();
+        pendingToolTtsText = text.trim();
+        Log.d(TAG, "queue tool tts source=" + source + " state=" + state + " len=" + pendingToolTtsText.length());
+        if ("speaking".equals(state) || isResponsePendingState(state)) {
+            main.postDelayed(() -> {
+                if (hasPendingToolTtsPlayback() && !"speaking".equals(state)) {
+                    startPendingToolTtsPlayback();
+                }
+            }, 3200);
+            return;
+        }
+        startPendingToolTtsPlayback();
+    }
+
+    private boolean hasPendingToolTtsPlayback() {
+        return pendingToolTtsText != null && !pendingToolTtsText.trim().isEmpty();
+    }
+
+    private boolean hasActiveToolTtsPlayback() {
+        return toolTtsPlaybackActive || hasPendingToolTtsPlayback() || waitingForRealtimeStopBeforeToolTts;
+    }
+
+    private void startPendingToolTtsPlayback() {
+        startPendingToolTtsPlayback(false);
+    }
+
+    private void startPendingToolTtsPlayback(boolean force) {
+        if (!hasPendingToolTtsPlayback()) return;
+        if (!force && isRealtimePlaybackActive()) {
+            Log.d(TAG, "tool tts waiting for realtime stop state=" + state + " realtimeOutputActive=" + realtimeOutputActive);
+            waitingForRealtimeStopBeforeToolTts = true;
+            interruptRealtimePlayback("tool_tts_playback");
+            main.postDelayed(() -> {
+                if (hasPendingToolTtsPlayback()) {
+                    Log.d(TAG, "tool tts force start after realtime interrupt state=" + state + " realtimeOutputActive=" + realtimeOutputActive);
+                    startPendingToolTtsPlayback(true);
+                }
+            }, 220);
+            return;
+        }
+        waitingForRealtimeStopBeforeToolTts = false;
+        realtimeOutputActive = false;
+        String id = pendingToolTtsId;
+        String text = pendingToolTtsText;
+        pendingToolTtsId = null;
+        pendingToolTtsText = null;
+        playToolTts(id, text);
+    }
+
+    private boolean isRealtimePlaybackActive() {
+        return realtimeOutputActive || "speaking".equals(state);
+    }
+
+    private void interruptRealtimePlayback(String reason) {
+        interruptRealtimePlayback(reason, true);
+    }
+
+    private void interruptRealtimePlayback(String reason, boolean discardUntilDone) {
+        if (discardUntilDone) {
+            discardRealtimeAudioUntilDone = true;
+        }
+        player.stop();
+        if (realtime.isOpen()) {
+            realtime.sendEvent("input_audio.interrupt", json("reason", reason));
+        }
+    }
+
+    private boolean maybeStartToolTtsAfterRealtimeStopped() {
+        realtimeOutputActive = false;
+        if (!hasPendingToolTtsPlayback()) return false;
+        waitingForRealtimeStopBeforeToolTts = false;
+        startPendingToolTtsPlayback();
+        return true;
+    }
+
+    private void playToolTts(String id, String text) {
+        if (id == null) id = "tool-" + System.currentTimeMillis();
+        toolTtsPlaybackActive = true;
+        pendingMicStart = false;
+        if (mic.running || inputAudioOpen) stopInputAudio("speaking");
+        if (realtime.isOpen()) interruptRealtimePlayback("tool_tts_playback", true);
+        player.stop();
+        setState("speaking");
+        Log.d(TAG, "tool tts request id=" + id + " len=" + text.length());
+        ttsPlayer.play(id, text, new GatewayTtsPlayer.Listener() {
+            @Override public void onStarted(String startedId, String spokenText) {
+                Log.d(TAG, "tool tts started id=" + startedId + " len=" + spokenText.length());
+                setState("speaking");
+                updateVoiceHome();
+            }
+
+            @Override public void onCompleted(String completedId) {
+                Log.d(TAG, "tool tts completed id=" + completedId);
+                toolTtsPlaybackActive = false;
+                setState("ready");
+                resumeListeningAfterToolTts(350);
+            }
+
+            @Override public void onError(String failedId, String message) {
+                Log.d(TAG, "tool tts failed: " + message);
+                toolTtsPlaybackActive = false;
+                setState("ready");
+                resumeListeningAfterToolTts(350);
+            }
+        });
+    }
+
+    private void resumeListeningAfterToolTts(long delayMs) {
+        if (!CONTINUOUS_CONVERSATION) return;
+        main.postDelayed(() -> {
+            if (voiceLastTurnView == null) return;
+            if (mic.running || inputAudioOpen) return;
+            if (!isBoundHeadsetConnected()) return;
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
+            pendingMicStart = true;
+            if (realtime.isOpen()) {
+                pendingMicStart = false;
+                startInputAudio();
+            } else {
+                realtime.connect();
+            }
+        }, delayMs);
+    }
+
+    private void stopToolTtsPlayback(boolean resumeListening) {
+        pendingToolTtsId = null;
+        pendingToolTtsText = null;
+        waitingForRealtimeStopBeforeToolTts = false;
+        toolTtsPlaybackActive = false;
+        if (ttsPlayer != null) ttsPlayer.stop();
+        if (resumeListening) resumeListeningAfterToolTts(80);
     }
 
     private void addWeatherCard(WeatherTool.WeatherResult result) {
@@ -1544,7 +2184,7 @@ public class MainActivity extends Activity {
             setState("error");
             return;
         }
-        setState("thinking");
+        setState("processing");
         String instructions;
         try {
             instructions = buildInstructions() + "\n\n" +
@@ -1579,13 +2219,17 @@ public class MainActivity extends Activity {
     private void toggleMic() {
         if (summaryInProgress) return;
         markConversationInteraction(false);
+        if (toolTtsPlaybackActive || (ttsPlayer != null && ttsPlayer.isPlaying())) {
+            stopToolTtsPlayback(true);
+            setState("ready");
+        }
         if ("news_tool".equals(state) || pendingNewsBroadcastPrompt != null ||
                 pendingRealtimeNewsAnswer || latestVoiceNews != null) {
             interruptNewsPlayback();
             return;
         }
         if (mic.running || inputAudioOpen) {
-            stopInputAudio("thinking");
+            stopInputAudio("processing");
             return;
         }
         if (!isBoundHeadsetConnected()) {
@@ -1601,19 +2245,19 @@ public class MainActivity extends Activity {
             realtime.connect();
             return;
         }
-        player.stop();
-        realtime.sendEvent("input_audio.interrupt", json("reason", "user_speech_detected"));
+        interruptRealtimePlayback("user_speech_detected");
         startInputAudio();
     }
 
     private void interruptNewsPlayback() {
         pendingNewsBroadcastPrompt = null;
+        stopToolTtsPlayback(true);
         pendingRealtimeNewsAnswer = false;
         pendingNewsToolAfterAck = false;
         pendingNewsQuestion = null;
         toolRouteSeq++;
         if (realtime.isOpen()) {
-            realtime.sendEvent("input_audio.interrupt", json("reason", "news_interrupt"));
+            interruptRealtimePlayback("news_interrupt");
             realtime.close();
         }
         discardRealtimeAudioUntilDone = false;
@@ -1654,12 +2298,37 @@ public class MainActivity extends Activity {
         mic.stop();
         if (audioLevelView != null) audioLevelView.setLevel(0);
         if (voiceOrbView != null) voiceOrbView.setLevel(0);
+        boolean sentInputEnd = false;
         if (inputAudioOpen) {
             realtime.sendEvent("input_audio.end", null);
             inputAudioOpen = false;
+            sentInputEnd = true;
         }
         startHerForegroundService(false);
         setState(nextState);
+        if (sentInputEnd && "processing".equals(nextState)) {
+            scheduleAsrFinalTimeout();
+        }
+    }
+
+    private void scheduleAsrFinalTimeout() {
+        cancelAsrFinalTimeout();
+        asrFinalTimeout = () -> {
+            asrFinalTimeout = null;
+            if (!"processing".equals(state)) return;
+            if (mic.running || inputAudioOpen || realtimeOutputActive || summaryInProgress) return;
+            Log.d(TAG, "asr final timeout, resume listening");
+            setState("ready");
+            scheduleContinuousListening(80);
+        };
+        main.postDelayed(asrFinalTimeout, ASR_FINAL_TIMEOUT_MS);
+    }
+
+    private void cancelAsrFinalTimeout() {
+        if (asrFinalTimeout != null) {
+            main.removeCallbacks(asrFinalTimeout);
+            asrFinalTimeout = null;
+        }
     }
 
     private void resetVad() {
@@ -1690,7 +2359,7 @@ public class MainActivity extends Activity {
         if (vadSpeechStarted && vadFrames > VAD_MIN_FRAMES_BEFORE_END && vadSilenceFrames >= VAD_SILENCE_FRAMES_TO_END) {
             main.post(() -> {
                 if (inputAudioOpen && mic.running) {
-                    stopInputAudio("thinking");
+                    stopInputAudio("processing");
                 }
             });
         }
@@ -1708,6 +2377,8 @@ public class MainActivity extends Activity {
     }
 
     private void enterAssistantSpeaking(int sampleRate) {
+        realtimeOutputActive = true;
+        markInitializationOpeningDeliveredFromRealtime();
         breatheScreenForAssistantReply();
         if (HALF_DUPLEX && (mic.running || inputAudioOpen)) {
             stopInputAudio("speaking");
@@ -1721,6 +2392,7 @@ public class MainActivity extends Activity {
 
     private void startContinuousListening() {
         if (!CONTINUOUS_CONVERSATION) return;
+        if (hasActiveToolTtsPlayback()) return;
         if (mic.running || inputAudioOpen || !realtime.isOpen()) return;
         if (!isBoundHeadsetConnected()) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
@@ -1730,6 +2402,7 @@ public class MainActivity extends Activity {
     private void scheduleContinuousListening(long delayMs) {
         if (!CONTINUOUS_CONVERSATION) return;
         main.postDelayed(() -> {
+            if (hasActiveToolTtsPlayback()) return;
             if ("ready".equals(state) && !mic.running && !inputAudioOpen) {
                 startContinuousListening();
             }
@@ -1737,6 +2410,10 @@ public class MainActivity extends Activity {
     }
 
     private void onRealtimeReady() {
+        if (hasActiveToolTtsPlayback()) {
+            setState("speaking");
+            return;
+        }
         if (pendingVoiceWakeIntent) {
             pendingVoiceWakeIntent = false;
             if (isBoundHeadsetConnected()) {
@@ -1746,8 +2423,12 @@ public class MainActivity extends Activity {
         }
         if (initPromptPending) {
             initPromptPending = false;
-            realtime.sendInputText(INIT_WAKE_EVENT);
-            setState("thinking");
+            updateInitializationContext();
+            setState("ready");
+            if (pendingMicStart) {
+                pendingMicStart = false;
+                startInputAudio();
+            }
             return;
         }
         if (pendingWeatherBroadcastPrompt != null) {
@@ -1755,7 +2436,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (pendingNewsToolAfterAck) {
-            realtime.sendEvent("input_audio.interrupt", json("reason", "news_tool_ack"));
+            interruptRealtimePlayback("news_tool_ack", false);
             realtime.sendInputText(NewsSkill.LOOKUP_ACK_PROMPT);
             setState("news_ack");
             return;
@@ -1764,7 +2445,7 @@ public class MainActivity extends Activity {
             String text = pendingText;
             pendingText = null;
             realtime.sendInputText(text);
-            setState("thinking");
+            setState("processing");
         }
         if (pendingMicStart) {
             pendingMicStart = false;
@@ -1773,6 +2454,7 @@ public class MainActivity extends Activity {
     }
 
     private void onAssistantDelta(String text) {
+        markInitializationOpeningDeliveredFromRealtime();
         if (activeAssistantId == null) {
             breatheScreenForAssistantReply();
             activeAssistantId = newId("assistant");
@@ -1786,6 +2468,12 @@ public class MainActivity extends Activity {
         }
         updateVoiceHome();
         renderMessages();
+    }
+
+    private void markInitializationOpeningDeliveredFromRealtime() {
+        if (!initializing || initOpeningDelivered) return;
+        initOpeningDelivered = true;
+        Log.d(TAG, "init realtime opening delivered");
     }
 
     private void breatheScreenForAssistantReply() {
@@ -1852,7 +2540,9 @@ public class MainActivity extends Activity {
         WindowManager.LayoutParams params = window.getAttributes();
         params.screenBrightness = replyOriginalBrightness;
         window.setAttributes(params);
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (!shouldKeepScreenOnForCurrentInteraction()) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
     }
 
     private void releaseReplyWakeLock() {
@@ -1942,6 +2632,8 @@ public class MainActivity extends Activity {
 
     private void setState(String next) {
         state = next;
+        updateInteractionKeepScreenOn();
+        updateResponsePendingTimeout(next);
         if (stateLabel != null) stateLabel.setText(stateLabelText());
         if (micButton != null) micButton.setText(next.equals("listening") ? "●" : voiceButtonText());
         if (voiceOrbView != null) voiceOrbView.setConversationState(next);
@@ -1950,8 +2642,58 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void updateInteractionKeepScreenOn() {
+        if (shouldKeepScreenOnForCurrentInteraction()) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            clearInteractionKeepScreenOn();
+        }
+    }
+
+    private void clearInteractionKeepScreenOn() {
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+
+    private boolean shouldKeepScreenOnForCurrentInteraction() {
+        if (initializing || summaryInProgress) return true;
+        if (mic.running || inputAudioOpen) return true;
+        if (hasActiveToolTtsPlayback()) return true;
+        return "connecting".equals(state) ||
+                "listening".equals(state) ||
+                isResponsePendingState(state) ||
+                "speaking".equals(state) ||
+                "news_ack".equals(state) ||
+                "news_tool".equals(state) ||
+                "summarizing".equals(state);
+    }
+
+    private void updateResponsePendingTimeout(String next) {
+        if (responsePendingTimeout != null) {
+            main.removeCallbacks(responsePendingTimeout);
+            responsePendingTimeout = null;
+        }
+        if (!isResponsePendingState(next)) return;
+        responsePendingTimeout = () -> {
+            responsePendingTimeout = null;
+            if (!isResponsePendingState(state)) return;
+            if (mic.running || inputAudioOpen || summaryInProgress) return;
+            if (realtime.isOpen()) {
+                setState("ready");
+                scheduleContinuousListening(80);
+            } else {
+                setState("idle");
+            }
+        };
+        main.postDelayed(responsePendingTimeout, RESPONSE_PENDING_VISIBLE_TIMEOUT_MS);
+    }
+
+    private boolean isResponsePendingState(String value) {
+        return "thinking".equals(value) || "processing".equals(value);
+    }
+
     private String stateLabelText() {
         if (summaryInProgress) return "Summarizing";
+        if (isResponsePendingState(state)) return "Processing";
         if ("news_ack".equals(state)) return "Checking news";
         if ("news_tool".equals(state)) return "Reading agentNews";
         if (!isBoundHeadsetConnected()) {
@@ -1963,12 +2705,14 @@ public class MainActivity extends Activity {
     }
 
     private String voiceButtonText() {
+        if ((ttsPlayer != null && ttsPlayer.isPlaying()) || hasPendingToolTtsPlayback()) return "■";
         if ("news_tool".equals(state) || pendingNewsBroadcastPrompt != null ||
                 pendingRealtimeNewsAnswer || latestVoiceNews != null) return "■";
         return "♩";
     }
 
     private boolean isBoundHeadsetConnected() {
+        if (demoMode) return true;
         return headsets != null && headsets.isBoundConnected();
     }
 
@@ -2066,6 +2810,82 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String initializationTranscript() {
+        StringBuilder transcript = new StringBuilder();
+        for (Message message : messages) {
+            transcript.append(message.role).append(": ").append(message.text).append('\n');
+        }
+        return transcript.toString();
+    }
+
+    private String ensureUserProfile(String userMd, String extractedUserName, String relationship) {
+        String value = userMd == null ? "" : userMd.trim();
+        if (isUsableProfileValue(extractedUserName)) {
+            value = value.replace("姓名/称呼：未明确", "姓名/称呼：" + extractedUserName)
+                    .replace("用户姓名：未明确", "用户姓名：" + extractedUserName)
+                    .replace("user_name: 未明确", "user_name: " + extractedUserName)
+                    .replace("user_name：未明确", "user_name：" + extractedUserName);
+        }
+        if (isUsableProfileValue(relationship)) {
+            value = value.replace("用户希望和 Agent 的关系：未明确", "用户希望和 Agent 的关系：" + relationship)
+                    .replace("关系：未明确", "关系：" + relationship);
+        }
+        boolean missingName = isUsableProfileValue(extractedUserName) && !value.contains(extractedUserName);
+        boolean missingRelationship = isUsableProfileValue(relationship) && !value.contains(relationship);
+        if (value.isEmpty() || value.length() < 24 || value.startsWith("{")) {
+            StringBuilder builder = new StringBuilder();
+            builder.append("## 基本信息\n");
+            builder.append("- 姓名/称呼：").append(isUsableProfileValue(extractedUserName) ? extractedUserName : "未明确").append('\n');
+            builder.append("- 用户希望和 Agent 的关系：").append(isUsableProfileValue(relationship) ? relationship : "未明确").append('\n');
+            builder.append("\n## 用户故事\n- 未明确\n");
+            builder.append("\n## 沟通偏好与边界\n- 以自然、亲近但有边界的方式交流。\n");
+            return builder.toString();
+        }
+        StringBuilder builder = new StringBuilder(value);
+        if (missingName || missingRelationship) {
+            builder.append("\n\n## 初始化显式设定\n");
+            if (missingName) builder.append("- 姓名/称呼：").append(extractedUserName).append('\n');
+            if (missingRelationship) builder.append("- 用户希望和 Agent 的关系：").append(relationship).append('\n');
+        }
+        return builder.toString();
+    }
+
+    private String ensureAgentProfile(String agentMd, String extractedAgentName, String extractedUserName, String relationship) {
+        String value = agentMd == null ? "" : agentMd.trim();
+        if (value.contains(SYSTEM_AGENT_NAME) || value.contains("与用户的关系定位：未明确")) {
+            value = "";
+        }
+        boolean missingName = isUsableProfileValue(extractedAgentName) && !value.contains(extractedAgentName);
+        boolean missingRelationship = isUsableProfileValue(relationship) && !value.contains(relationship);
+        if (value.isEmpty() || value.length() < 24 || value.startsWith("{")) {
+            StringBuilder builder = new StringBuilder();
+            builder.append("- Agent name: ").append(extractedAgentName).append('\n');
+            builder.append("- 默认语气：成熟、温柔、亲近，像真实的人一样自然表达。\n");
+            builder.append("- 与用户的关系定位：");
+            if (isUsableProfileValue(relationship)) {
+                builder.append("用户希望你作为").append(extractedUserName.isEmpty() ? "用户" : extractedUserName).append("的").append(relationship).append("。\n");
+            } else {
+                builder.append("未明确。\n");
+            }
+            builder.append("- 后续对话策略：尊重 user.md 中的姓名和关系设定，不要把已设定关系改写成普通朋友。\n");
+            return builder.toString();
+        }
+        StringBuilder builder = new StringBuilder(value);
+        if (missingName || missingRelationship || value.contains("未明确")) {
+            builder.append("\n\n## 初始化显式设定\n");
+            if (missingName) builder.append("- Agent name: ").append(extractedAgentName).append('\n');
+            if (missingRelationship) {
+                builder.append("- 与用户的关系定位：用户希望你作为")
+                        .append(extractedUserName.isEmpty() ? "用户" : extractedUserName)
+                        .append("的")
+                        .append(relationship)
+                        .append("。\n");
+            }
+            builder.append("- 对话时必须尊重上述姓名和关系设定，不要否认或改写成普通朋友。\n");
+        }
+        return builder.toString();
+    }
+
     private void summarizeInitialization() {
         if (BuildConfig.AGENTLLM_API_KEY.isEmpty()) {
             toastError("Missing AGENTLLM_API_KEY in local.properties");
@@ -2074,28 +2894,34 @@ public class MainActivity extends Activity {
 
         JSONObject body = new JSONObject();
         JSONArray llmMessages = new JSONArray();
+        final String initTranscript = initializationTranscript();
         try {
             JSONObject system = new JSONObject();
             system.put("role", "system");
-            system.put("content", "你是 Doris 的潜意识模型，负责把初始化访谈整理为长期记忆。只输出 JSON，不要解释。格式：{\"user_name\":\"...\",\"user_md\":\"...\",\"agent_md\":\"...\"}");
+            String initSummarySystemPrompt =
+                    "你是 Agent 的潜意识模型，负责把初始化访谈整理为长期记忆。只输出 JSON，不要解释。" +
+                    "格式：{\"agent_name\":\"...\",\"user_name\":\"...\",\"user_md\":\"...\",\"agent_md\":\"...\"}。" +
+                    "如果用户希望 Agent 自己取名，请选择一个像真人一样、洋气、短、适合长期陪伴使用的名字，并写入 agent_name。" +
+                    "推荐候选：" + initAgentNameCandidates + "。禁止使用豆包、小包、包包、助手、AI、机器人、Doris 等平台感、幼稚或默认名。";
+            system.put("content", initSummarySystemPrompt);
             llmMessages.put(system);
 
-            StringBuilder transcript = new StringBuilder();
-            for (Message message : messages) {
-                transcript.append(message.role).append(": ").append(message.text).append('\n');
-            }
             JSONObject user = new JSONObject();
             user.put("role", "user");
-            user.put("content",
-                    "Agent 名字：" + agentName + "\n" +
+            String initSummaryUserPrompt =
+                    "用户预设的 Agent 名字：" + (agentName.trim().isEmpty() ? "未指定，请从初始化对话中自行确定" : agentName) + "\n" +
                     "请使用 c-her 总结以下初始化对话，生成 user.md 和 Agent.md。要求：\n" +
-                    "1. user_name 是用户希望被称呼的名字。\n" +
-                    "2. user_md 包含用户姓名/称呼、用户希望和 AI 的关系、用户的故事、沟通偏好、重要边界或目标。\n" +
-                    "3. agent_md 包含 Agent 的名字、默认语气、与该用户相处的关系定位、后续对话策略。\n" +
-                    "2. 信息不确定时写“未明确”。\n" +
-                    "4. Markdown 内容要适合后续作为系统提示词注入。\n\n" +
-                    transcript);
+                    "1. agent_name 是 Agent 最终名字；如果用户没有指定，而对话中表达希望 Agent 自己取名，你优先从这些候选中取一个，也可以选择同风格女性名字：" + initAgentNameCandidates + "。不要使用豆包、小包、包包、Doris、助手、AI、机器人。\n" +
+                    "2. user_name 是用户希望被称呼的名字，必须从用户回答中提取。\n" +
+                    "3. user_md 包含用户姓名/称呼、用户希望和 Agent 的关系、用户的故事、沟通偏好、重要边界或目标。\n" +
+                    "4. agent_md 包含 Agent 的名字、默认语气、与该用户相处的关系定位、后续对话策略。\n" +
+                    "5. 信息不确定时写“未明确”，但不要把已明确回答的名字、关系写成未明确。\n" +
+                    "6. Markdown 内容要适合后续作为系统提示词注入。\n\n" +
+                    initTranscript;
+            user.put("content", initSummaryUserPrompt);
             llmMessages.put(user);
+            Log.d(TAG, "init subconscious system prompt:\n" + initSummarySystemPrompt);
+            Log.d(TAG, "init subconscious user prompt:\n" + initSummaryUserPrompt);
 
             body.put("model", BACKGROUND_MODEL);
             body.put("messages", llmMessages);
@@ -2108,38 +2934,62 @@ public class MainActivity extends Activity {
 
         agents.sendSubconscious(body, new AgentApiClient.ReplyCallback() {
             @Override public void onSuccess(String content) {
+                Log.d(TAG, "init subconscious reply:\n" + content);
                 String extractedUserName = "";
+                String extractedAgentName = agentName.trim();
                 String userMd = content;
-                String agentMd = "- Agent name: " + agentName + "\n- 默认语气：温柔大姐姐。\n- 与用户的关系定位：未明确。";
+                String agentMd = "";
+                String transcriptUserName = inferUserNameFromTranscript(initTranscript);
+                String transcriptRelationship = inferRelationshipFromTranscript(initTranscript);
+                String transcriptAgentName = inferAgentNameFromTranscript(initTranscript);
+                boolean selfNamed = agentName.trim().isEmpty();
                 try {
                     JSONObject profile = parseJsonObject(content);
+                    extractedAgentName = profile.optString("agent_name", extractedAgentName).trim();
                     extractedUserName = profile.optString("user_name", "").trim();
                     userMd = profile.optString("user_md", content).trim();
                     agentMd = profile.optString("agent_md", agentMd).trim();
                 } catch (JSONException error) {
                     extractedUserName = extractUserName(content);
                 }
+                if (!isUsableProfileValue(extractedUserName)) extractedUserName = extractUserName(userMd);
+                if (!isUsableProfileValue(extractedUserName)) extractedUserName = transcriptUserName;
+                extractedAgentName = cleanAgentName(extractedAgentName, selfNamed);
+                if (extractedAgentName.isEmpty()) extractedAgentName = cleanAgentName(extractAgentName(agentMd), selfNamed);
+                if (extractedAgentName.isEmpty()) extractedAgentName = cleanAgentName(transcriptAgentName, selfNamed);
+                if (extractedAgentName.isEmpty()) extractedAgentName = fallbackAgentName();
+                Log.d(TAG, "init resolved profile agent_name=" + extractedAgentName +
+                        " user_name=" + extractedUserName +
+                        " relationship=" + transcriptRelationship);
+                userMd = ensureUserProfile(userMd, extractedUserName, transcriptRelationship);
+                agentMd = ensureAgentProfile(agentMd, extractedAgentName, extractedUserName, transcriptRelationship);
                 String memory = "# user.md\n\n" +
-                        "- Agent name: " + agentName + "\n" +
+                        "- Agent name: " + extractedAgentName + "\n" +
                         "- Created at: " + new Date() + "\n\n" +
                         userMd + "\n";
                 String agentProfile = "# Agent.md\n\n" +
-                        "- Agent name: " + agentName + "\n" +
+                        "- Agent name: " + extractedAgentName + "\n" +
                         "- Created at: " + new Date() + "\n\n" +
                         agentMd + "\n";
                 String finalUserName = extractedUserName;
+                String finalAgentName = extractedAgentName;
                 writeUserMemory(memory);
                 writeAgentMemory(agentProfile);
                 userMemory = memory;
                 agentMemory = agentProfile;
+                agentName = finalAgentName;
                 userName = finalUserName.isEmpty() ? displayUserName() : finalUserName;
-                getSharedPreferences("her", MODE_PRIVATE).edit().putString("user_name", userName).apply();
+                getSharedPreferences("her", MODE_PRIVATE).edit()
+                        .putString("agent_name", agentName)
+                        .putString("user_name", userName)
+                        .apply();
                 initialized = true;
                 initializing = false;
                 summaryInProgress = false;
                 initSummaryPending = false;
                 stopInitProgressAnimation();
                 if (memoryStore != null) {
+                    memoryStore.updateSessionAgentName(sessionId, agentName);
                     memoryStore.insertMemory(sessionId, "profile", memory, 0, 0);
                     memoryStore.insertMemory(sessionId, "agent", agentProfile, 0, 0);
                     conversationMemory = memoryStore.relevantMemory("");
@@ -2151,6 +3001,7 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onError(String message) {
+                Log.d(TAG, "init subconscious error: " + message);
                 summaryInProgress = false;
                 stopInitProgressAnimation();
                 toastError(message);
@@ -2161,9 +3012,15 @@ public class MainActivity extends Activity {
 
     private String buildInstructions() {
         if (initializing) {
+            String currentAgentName = agentName == null ? "" : agentName.trim();
+            String identityLine = currentAgentName.isEmpty()
+                    ? "你还没有固定名字。请在首次主动介绍自己时，为自己取一个像真人一样、洋气、自然、短、适合长期陪伴用户的女性名字，并在后续初始化中保持使用这个名字。推荐候选本轮已随机排序：" + initAgentNameCandidates + "。你也可以选择同风格名字；禁止使用豆包、小包、包包、助手、AI、机器人、Doris 等平台感、幼稚或默认名。\n"
+                    : "你叫 " + currentAgentName + "。\n";
             String initGuide;
             if (initUserTurns <= 0) {
-                initGuide = "当前阶段：还没有收到用户回答。收到系统事件后，你必须主动问候用户，介绍自己是 Doris，然后只问第 1 题：用户的名字，以及希望你怎么称呼用户。";
+                initGuide = currentAgentName.isEmpty()
+                        ? "当前阶段：还没有收到用户回答。收到系统事件后，你必须主动问候用户，先用第一人称告诉用户你给自己取的名字，然后只问第 1 题：用户的名字，以及希望你怎么称呼用户。名字必须像真人，不要叫豆包、Doris 或任何平台/助手感名字。"
+                        : "当前阶段：还没有收到用户回答。收到系统事件后，你必须主动问候用户，介绍自己是 " + currentAgentName + "，然后只问第 1 题：用户的名字，以及希望你怎么称呼用户。";
             } else if (initUserTurns == 1) {
                 initGuide = "当前阶段：已经收到第 1 题答案。你的下一次回复只能简短回应，然后问第 2 题：用户希望和你建立什么关系。";
             } else if (initUserTurns == 2) {
@@ -2171,18 +3028,18 @@ public class MainActivity extends Activity {
             } else {
                 initGuide = "当前阶段：三题都已回答。不要继续聊天或提问，只说明你正在写入 user.md。";
             }
-            return "你叫 " + SYSTEM_AGENT_NAME + "。\n" +
+            return identityLine +
                     INSTRUCTIONS + "\n" +
                 INIT_BASE_PROMPT + "\n" +
-                "第 0 步：你必须先主动介绍自己，说清楚你是 Doris，一个 AI Agent，也是用户的朋友和助理。\n" +
+                "第 0 步：你必须先主动介绍自己，说清楚你是一个 AI Agent，也是用户的朋友和助理。如果还没有固定名字，请你自己取一个像真人一样、洋气、自然的女性名字并告诉用户。本轮随机排序候选包括：" + initAgentNameCandidates + "。你也可以选择同风格名字；不要使用豆包、Doris 或平台/助手感名字。\n" +
                 "第 1 题：用户的名字，以及希望你怎么称呼用户。\n" +
-                "第 2 题：用户希望和 Doris 建立什么关系。\n" +
+                "第 2 题：用户希望和你建立什么关系。\n" +
                 "第 3 题：用户的故事，一段开放式自我介绍，包括近况、经历、在意的事或希望你记住的部分。\n" +
                 "第三题回答后，不要再输出新的轮次；客户端会关闭语音交互模型，并交给潜意识模型写入 user.md 和 Agent.md。\n" +
                 initGuide;
         }
         String recent = recentDialogueForPrompt();
-        return trimForPrompt("你叫 " + SYSTEM_AGENT_NAME + "。\n" +
+        return trimForPrompt("你叫 " + effectiveAgentName() + "。\n" +
                 INSTRUCTIONS + "\n" +
                 WeatherSkill.promptBlock(latestWeatherFact, pendingRealtimeWeatherAnswer) +
                 NewsSkill.promptBlock(latestNewsFact, pendingRealtimeNewsAnswer) +
@@ -2191,6 +3048,7 @@ public class MainActivity extends Activity {
                 userMemory + "\n\n" +
                 "以下是本地 Agent.md。你需要把它作为自己的关系定位、语气和长期行为准则使用。\n\n" +
                 agentMemory + "\n\n" +
+                "姓名和关系设定规则：如果 user.md 或 Agent.md 已记录用户姓名/称呼或用户希望与你建立的关系，你必须优先承认并沿用这些设定；不要说用户没告诉过名字，也不要把已设定的女朋友/恋人关系改写成普通朋友。\n\n" +
                 "以下是 SQLite 长期聊天记忆和索引检索出的相关摘要。把它用于延续关系、调整称呼、话题和语气，但不要主动说明你在读取记忆。\n\n" +
                 conversationMemory + "\n\n" +
                 "最近会话片段：\n" + recent, 3900);
@@ -2280,6 +3138,7 @@ public class MainActivity extends Activity {
             setState("ready");
             onRealtimeReady();
         } else if ("asr.final".equals(type) && payload != null) {
+            cancelAsrFinalTimeout();
             String text = payload.optString("text", "").trim();
             if (isHiddenSystemEvent(text)) {
                 ignoreNextInitTrigger = false;
@@ -2293,9 +3152,7 @@ public class MainActivity extends Activity {
                 markConversationInteraction(false);
                 addChatMessage("user", text);
             }
-            if (initializing && !text.isEmpty()) {
-                initUserTurns++;
-                updateInitProgress();
+            if (initializing && !text.isEmpty() && recordInitializationAnswer(text)) {
                 if (initUserTurns >= INIT_TARGET_USER_TURNS) {
                     initSummaryPending = true;
                     activeAssistantId = null;
@@ -2312,30 +3169,42 @@ public class MainActivity extends Activity {
             if (!initializing) routeToolsInBackground(text);
         } else if ("assistant.state".equals(type) && payload != null) {
             String providerState = payload.optString("state", "ready");
-            if ("thinking".equals(providerState)) setState("thinking");
+            if ("thinking".equals(providerState)) {
+                Log.d(TAG, "provider thinking");
+                return;
+            }
+            if (hasActiveToolTtsPlayback() || (ttsPlayer != null && ttsPlayer.isPlaying())) return;
             if ("tts_streaming".equals(providerState)) enterAssistantSpeaking(0);
             if ("idle".equals(providerState) || "listening".equals(providerState)) setState(mic.running ? "listening" : "ready");
         } else if ("assistant.text.delta".equals(type) && payload != null) {
             onAssistantDelta(payload.optString("text", ""));
         } else if ("output_audio.start".equals(type) && payload != null) {
+            realtimeOutputActive = true;
+            if (toolTtsPlaybackActive || (ttsPlayer != null && ttsPlayer.isPlaying())) {
+                interruptRealtimePlayback("tts_already_playing");
+                return;
+            }
             if (!discardRealtimeAudioUntilDone) {
                 enterAssistantSpeaking(payload.optInt("sample_rate", 24000));
             }
         } else if ("output_audio.done".equals(type)) {
             discardRealtimeAudioUntilDone = false;
+            realtimeOutputActive = false;
             persistActiveAssistantMessage();
             activeAssistantId = null;
             if (pendingNewsToolAfterAck) {
                 runPendingNewsToolAfterAck();
                 return;
             }
+            setState("ready");
+            if (maybeStartToolTtsAfterRealtimeStopped()) {
+                return;
+            }
             if (pendingWeatherBroadcastPrompt != null) {
-                setState("ready");
                 schedulePendingWeatherBroadcast(900);
                 return;
             }
             if (pendingNewsBroadcastPrompt != null) {
-                setState("ready");
                 schedulePendingNewsBroadcast(250);
                 return;
             }
@@ -2352,10 +3221,10 @@ public class MainActivity extends Activity {
                 finishInitializationWithSummary();
                 return;
             }
-            setState("ready");
             scheduleContinuousListening(650);
         } else if ("output_audio.stop".equals(type)) {
             discardRealtimeAudioUntilDone = false;
+            realtimeOutputActive = false;
             player.stop();
             persistActiveAssistantMessage();
             activeAssistantId = null;
@@ -2363,13 +3232,15 @@ public class MainActivity extends Activity {
                 runPendingNewsToolAfterAck();
                 return;
             }
+            setState("ready");
+            if (maybeStartToolTtsAfterRealtimeStopped()) {
+                return;
+            }
             if (pendingWeatherBroadcastPrompt != null) {
-                setState(mic.running ? "listening" : "ready");
                 schedulePendingWeatherBroadcast(900);
                 return;
             }
             if (pendingNewsBroadcastPrompt != null) {
-                setState(mic.running ? "listening" : "ready");
                 schedulePendingNewsBroadcast(250);
                 return;
             }
@@ -2389,7 +3260,7 @@ public class MainActivity extends Activity {
         } else if ("error".equals(type) && payload != null) {
             String code = payload.optString("code", "");
             String message = payload.optString("message", "Realtime error");
-            if ("realtime_unavailable".equals(code) && payload.optBoolean("recoverable", false)) {
+            if (payload.optBoolean("recoverable", false)) {
                 retryRealtime(message);
                 return;
             }
@@ -2399,7 +3270,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean isHiddenInitTrigger(String text) {
-        return text != null && (text.contains("系统事件") || text.contains("主动问候") || text.contains("Doris 主动"));
+        return text != null && (text.contains("系统事件") || text.contains("主动问候") || text.contains("Agent 主动"));
     }
 
     private boolean isHiddenSystemEvent(String text) {
@@ -2409,10 +3280,14 @@ public class MainActivity extends Activity {
     }
 
     private void retryRealtime(String reason) {
+        if (initializing) {
+            degradeRealtimeForInitialization(reason);
+            return;
+        }
         realtimeRetryCount++;
         if (realtimeRetryCount > 2) {
-            toastError("语音交互模型暂时连接不上：" + reason);
-            setState("error");
+            toastError("语音交互模型暂时不可用，已切到文字聊天：" + reason);
+            setState("text_only");
             return;
         }
         toastError("语音交互模型连接超时，正在重试 " + realtimeRetryCount + "/2...");
@@ -2425,6 +3300,21 @@ public class MainActivity extends Activity {
         main.postDelayed(() -> {
             if (!realtime.isOpen()) realtime.connect();
         }, 1200);
+    }
+
+    private void degradeRealtimeForInitialization(String reason) {
+        Log.d(TAG, "init realtime degraded: " + reason);
+        mic.stop();
+        inputAudioOpen = false;
+        pendingMicStart = false;
+        pendingVoiceWakeIntent = false;
+        initPromptPending = false;
+        realtimeRetryCount = 0;
+        player.stop();
+        realtime.close();
+        setState("text_only");
+        updateInitProgress();
+        toastError("语音服务暂时不可用，我们先用文字继续初始化。");
     }
 
     private void handleMemorySnapshot(JSONObject payload) {

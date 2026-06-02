@@ -66,11 +66,20 @@ final class RealtimeClient extends WebSocketListener {
     }
 
     @Override public void onOpen(WebSocket webSocket, Response response) {
+        if (webSocket != socket) {
+            Log.d(tag, "ignore stale websocket open");
+            webSocket.close(1000, "stale connection");
+            return;
+        }
         Log.d(tag, "websocket open");
-        sendEvent("session.start", host.buildRealtimeSessionPayload());
+        sendEvent(webSocket, "session.start", host.buildRealtimeSessionPayload());
     }
 
     @Override public void onMessage(WebSocket webSocket, String text) {
+        if (webSocket != socket) {
+            Log.d(tag, "ignore stale websocket message");
+            return;
+        }
         try {
             JSONObject event = new JSONObject(text);
             JSONObject payload = event.optJSONObject("payload");
@@ -83,11 +92,19 @@ final class RealtimeClient extends WebSocketListener {
     }
 
     @Override public void onMessage(WebSocket webSocket, ByteString bytes) {
+        if (webSocket != socket) {
+            Log.d(tag, "ignore stale websocket audio");
+            return;
+        }
         Log.d(tag, "audio bytes " + bytes.size());
         host.onRealtimeAudio(bytes.toByteArray());
     }
 
     @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+        if (webSocket != socket) {
+            Log.d(tag, "ignore stale websocket failure");
+            return;
+        }
         socket = null;
         sessionCreated = false;
         Log.e(tag, "websocket failure", t);
@@ -95,6 +112,10 @@ final class RealtimeClient extends WebSocketListener {
     }
 
     @Override public void onClosed(WebSocket webSocket, int code, String reason) {
+        if (webSocket != socket) {
+            Log.d(tag, "ignore stale websocket closed code=" + code + " reason=" + reason);
+            return;
+        }
         socket = null;
         sessionCreated = false;
         Log.d(tag, "websocket closed code=" + code + " reason=" + reason);
@@ -127,13 +148,17 @@ final class RealtimeClient extends WebSocketListener {
     }
 
     void sendEvent(String type, JSONObject payload) {
-        if (socket == null) return;
+        sendEvent(socket, type, payload);
+    }
+
+    private void sendEvent(WebSocket target, String type, JSONObject payload) {
+        if (target == null || target != socket) return;
         Log.d(tag, "send event " + type);
         JSONObject envelope = new JSONObject();
         try {
             envelope.put("type", type);
             if (payload != null) envelope.put("payload", payload);
         } catch (JSONException ignored) { }
-        socket.send(envelope.toString());
+        target.send(envelope.toString());
     }
 }

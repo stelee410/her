@@ -27,7 +27,7 @@ final class InitializationPage {
         titleParams.topMargin = ui.dp(34);
         content.addView(title, titleParams);
 
-        TextView subtitle = ui.text("先给她一个名字。接下来她会主动介绍自己，然后了解你的称呼、你希望彼此是什么关系，以及你的生活习惯。", 15, 0xB8FFE0E0, 0);
+        TextView subtitle = ui.text("可以先给她一个名字，也可以留空让她自己取名。接下来她会主动介绍自己，然后了解你的称呼、你希望彼此是什么关系，以及你的生活习惯。", 15, 0xB8FFE0E0, 0);
         subtitle.setGravity(Gravity.CENTER);
         subtitle.setLineSpacing(ui.dp(3), 1.0f);
         LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(-1, -2);
@@ -35,8 +35,8 @@ final class InitializationPage {
         content.addView(subtitle, subtitleParams);
 
         EditText nameInput = new EditText(activity);
-        nameInput.setText(agentName);
-        nameInput.setHint("Agent name");
+        nameInput.setText(agentName == null ? "" : agentName);
+        nameInput.setHint("Agent name · 留空由她自己取名");
         nameInput.setHintTextColor(0x80FFE0E0);
         nameInput.setTextColor(Color.WHITE);
         nameInput.setTextSize(21);

@@ -6,6 +6,8 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 
+import java.nio.charset.StandardCharsets;
+
 final class MemoryStore extends SQLiteOpenHelper {
     MemoryStore(Activity activity) {
         super(activity, "her_memory.db", null, 1);
@@ -51,6 +53,13 @@ final class MemoryStore extends SQLiteOpenHelper {
         return getWritableDatabase().insert("sessions", null, values);
     }
 
+    void updateSessionAgentName(long sessionId, String agentName) {
+        if (sessionId <= 0 || agentName == null || agentName.trim().isEmpty()) return;
+        ContentValues values = new ContentValues();
+        values.put("agent_name", agentName.trim());
+        getWritableDatabase().update("sessions", values, "id=?", new String[]{String.valueOf(sessionId)});
+    }
+
     void insertMessage(long sessionId, String role, String content) {
         ContentValues values = new ContentValues();
         values.put("session_id", sessionId);
@@ -91,8 +100,8 @@ final class MemoryStore extends SQLiteOpenHelper {
                 if (first == 0) first = id;
                 last = id;
                 count++;
-                transcript.append(cursor.getString(1)).append(": ")
-                        .append(cursor.getString(2)).append('\n');
+                transcript.append(cursorString(cursor, 1)).append(": ")
+                        .append(cursorString(cursor, 2)).append('\n');
             }
         } finally {
             cursor.close();
@@ -117,9 +126,11 @@ final class MemoryStore extends SQLiteOpenHelper {
                         new String[]{match});
                 try {
                     while (cursor.moveToNext()) {
-                        if (isTransientMemory(cursor.getString(1))) continue;
-                        builder.append("- [").append(cursor.getString(0)).append("] ")
-                                .append(cursor.getString(1)).append('\n');
+                        String kind = cursorString(cursor, 0);
+                        String content = cursorString(cursor, 1);
+                        if (isPromptMemoryExcluded(kind, content)) continue;
+                        builder.append("- [").append(kind).append("] ")
+                                .append(content).append('\n');
                     }
                 } finally {
                     cursor.close();
@@ -130,9 +141,11 @@ final class MemoryStore extends SQLiteOpenHelper {
                 "SELECT kind, content FROM memories ORDER BY id DESC LIMIT 6", null);
         try {
             while (recent.moveToNext()) {
-                if (isTransientMemory(recent.getString(1))) continue;
-                builder.append("- [").append(recent.getString(0)).append("] ")
-                        .append(recent.getString(1)).append('\n');
+                String kind = cursorString(recent, 0);
+                String content = cursorString(recent, 1);
+                if (isPromptMemoryExcluded(kind, content)) continue;
+                builder.append("- [").append(kind).append("] ")
+                        .append(content).append('\n');
             }
         } finally {
             recent.close();
@@ -144,7 +157,7 @@ final class MemoryStore extends SQLiteOpenHelper {
         Cursor cursor = getReadableDatabase().rawQuery(
                 "SELECT content FROM memories WHERE kind='tone' ORDER BY id DESC LIMIT 1", null);
         try {
-            if (cursor.moveToFirst()) return cursor.getString(0);
+            if (cursor.moveToFirst()) return cursorString(cursor, 0);
         } finally {
             cursor.close();
         }
@@ -180,5 +193,19 @@ final class MemoryStore extends SQLiteOpenHelper {
 
     private boolean isTransientMemory(String content) {
         return WeatherSkill.isTransientMemory(content) || NewsSkill.isTransientMemory(content);
+    }
+
+    private boolean isPromptMemoryExcluded(String kind, String content) {
+        return "agentvoice_snapshot".equals(kind) || isTransientMemory(content);
+    }
+
+    private String cursorString(Cursor cursor, int columnIndex) {
+        int type = cursor.getType(columnIndex);
+        if (type == Cursor.FIELD_TYPE_NULL) return "";
+        if (type == Cursor.FIELD_TYPE_BLOB) {
+            byte[] bytes = cursor.getBlob(columnIndex);
+            return bytes == null ? "" : new String(bytes, StandardCharsets.UTF_8);
+        }
+        return cursor.getString(columnIndex);
     }
 }

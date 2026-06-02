@@ -72,6 +72,22 @@ final class HerUi {
         TextView s = text(symbol, 23, 0xCCFFFFFF, 0);
         s.setGravity(Gravity.CENTER);
         row.addView(s, new LinearLayout.LayoutParams(dp(48), -1));
+        addNavRowText(row, label, value, action);
+        return row;
+    }
+
+    View navRow(int iconResId, String label, String value, Runnable action) {
+        LinearLayout row = row();
+        ImageView icon = new ImageView(activity);
+        icon.setImageResource(iconResId);
+        icon.setColorFilter(0xCCFFFFFF);
+        icon.setPadding(dp(12), dp(18), dp(12), dp(18));
+        row.addView(icon, new LinearLayout.LayoutParams(dp(48), -1));
+        addNavRowText(row, label, value, action);
+        return row;
+    }
+
+    private void addNavRowText(LinearLayout row, String label, String value, Runnable action) {
         row.addView(text(label, 16, Color.WHITE, 0), new LinearLayout.LayoutParams(0, -1, 1));
         TextView val = text(value, 13, 0x99FFE0E0, 0);
         val.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
@@ -80,7 +96,6 @@ final class HerUi {
         chevron.setGravity(Gravity.CENTER);
         row.addView(chevron, new LinearLayout.LayoutParams(dp(28), -1));
         if (action != null) row.setOnClickListener(v -> action.run());
-        return row;
     }
 
     TextView icon(String value) {

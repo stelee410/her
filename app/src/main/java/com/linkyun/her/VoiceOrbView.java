@@ -41,7 +41,7 @@ final class VoiceOrbView extends HerMarkView {
         float energy = level / 100f;
         if ("speaking".equals(conversationState)) {
             energy = Math.max(energy, 0.34f + 0.14f * (float) Math.sin(t * Math.PI * 4));
-        } else if ("thinking".equals(conversationState) || "connecting".equals(conversationState)) {
+        } else if ("thinking".equals(conversationState) || "processing".equals(conversationState) || "connecting".equals(conversationState)) {
             energy = Math.max(energy, 0.18f + 0.08f * (float) Math.sin(t * Math.PI * 2));
         } else if ("listening".equals(conversationState)) {
             energy = Math.max(energy, 0.12f);
