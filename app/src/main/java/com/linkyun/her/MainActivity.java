@@ -165,6 +165,7 @@ public class MainActivity extends Activity {
     private WeatherTool weatherTool;
     private NewsTool newsTool;
     private VoicePipelineManager voicePipeline;
+    private PendingBroadcastCoordinator pendingBroadcasts;
     private MediaSession headsetMediaSession;
     private HerUi ui;
 
@@ -205,8 +206,6 @@ public class MainActivity extends Activity {
     private int vadSilenceFrames = 0;
     private int vadFrames = 0;
     private int continuousListeningSeq = 0;
-    private int pendingWeatherBroadcastSeq = 0;
-    private int pendingNewsBroadcastSeq = 0;
     private int weatherIntentSeq = 0;
     private int toolRouteSeq = 0;
     private String pendingText = null;
@@ -214,8 +213,6 @@ public class MainActivity extends Activity {
     private String latestWeatherFact = "";
     private String latestNewsFact = "";
     private String pendingNewsQuestion = null;
-    private String pendingWeatherBroadcastPrompt = null;
-    private String pendingNewsBroadcastPrompt = null;
     private String activeAssistantId = null;
     private WeatherTool.WeatherResult latestVoiceWeather = null;
     private NewsTool.NewsResult latestVoiceNews = null;
@@ -265,6 +262,7 @@ public class MainActivity extends Activity {
                 BuildConfig.AGENTLLM_BASE_URL, BuildConfig.AGENTLLM_API_KEY,
                 "doubao-tts", DEFAULT_VOICE);
         voicePipeline = createVoicePipelineManager();
+        pendingBroadcasts = createPendingBroadcastCoordinator();
         voices.add(new Voice(DEFAULT_VOICE, "Doris Clone", "female"));
         voices.add(new Voice("zh_female_roumeinvyou_emo_v2_mars_bigtts", "柔美女友（多情感）", "female"));
         voices.add(new Voice("zh_female_gaolengyujie_emo_v2_mars_bigtts", "高冷御姐（多情感）", "female"));
@@ -375,6 +373,47 @@ public class MainActivity extends Activity {
 
                     @Override public void stopRealtimeOutput() {
                         player.stop();
+                    }
+                });
+    }
+
+    private PendingBroadcastCoordinator createPendingBroadcastCoordinator() {
+        return new PendingBroadcastCoordinator((runnable, delayMs) -> main.postDelayed(runnable, delayMs),
+                new PendingBroadcastCoordinator.Host() {
+                    @Override public boolean canSendWeatherNow() {
+                        return !"speaking".equals(state) && !isResponsePendingState(state);
+                    }
+
+                    @Override public boolean canSendNewsNow() {
+                        return !"speaking".equals(state) && !isResponsePendingState(state);
+                    }
+
+                    @Override public boolean isRealtimeOpen() {
+                        return realtime.isOpen();
+                    }
+
+                    @Override public void connectRealtime() {
+                        realtime.connect();
+                    }
+
+                    @Override public void pushWeatherFact() {
+                        MainActivity.this.pushRealtimeWeatherFact();
+                    }
+
+                    @Override public void pushNewsFact() {
+                        MainActivity.this.pushRealtimeNewsFact();
+                    }
+
+                    @Override public void sendRealtimeText(String text) {
+                        realtime.sendInputText(text);
+                    }
+
+                    @Override public void onBroadcastSent() {
+                        setState("processing");
+                    }
+
+                    @Override public void logBroadcast(String message) {
+                        Log.d(TAG, message + " state=" + state);
                     }
                 });
     }
@@ -578,8 +617,8 @@ public class MainActivity extends Activity {
         stopToolTtsPlayback(true);
         persistActiveAssistantMessage();
         activeAssistantId = null;
-        pendingWeatherBroadcastPrompt = null;
-        pendingNewsBroadcastPrompt = null;
+        clearPendingWeatherBroadcast();
+        clearPendingNewsBroadcast();
         pendingNewsQuestion = null;
         pendingNewsToolAfterAck = false;
         pendingRealtimeWeatherAnswer = false;
@@ -1072,10 +1111,10 @@ public class MainActivity extends Activity {
         pendingMicStart = false;
         pendingText = null;
         pendingWeatherQuestion = null;
-        pendingWeatherBroadcastPrompt = null;
+        clearPendingWeatherBroadcast();
         pendingRealtimeWeatherAnswer = false;
         latestWeatherFact = "";
-        pendingNewsBroadcastPrompt = null;
+        clearPendingNewsBroadcast();
         pendingNewsQuestion = null;
         pendingNewsToolAfterAck = false;
         pendingRealtimeNewsAnswer = false;
@@ -1371,10 +1410,10 @@ public class MainActivity extends Activity {
         pendingMicStart = false;
         pendingText = null;
         pendingWeatherQuestion = null;
-        pendingWeatherBroadcastPrompt = null;
+        clearPendingWeatherBroadcast();
         pendingRealtimeWeatherAnswer = false;
         latestWeatherFact = "";
-        pendingNewsBroadcastPrompt = null;
+        clearPendingNewsBroadcast();
         pendingNewsQuestion = null;
         pendingNewsToolAfterAck = false;
         pendingRealtimeNewsAnswer = false;
@@ -1696,12 +1735,12 @@ public class MainActivity extends Activity {
         Log.d(TAG, "news intent hit realtime=" + realtimeMode + " text=" + text);
         latestNewsFact = "";
         pendingRealtimeNewsAnswer = realtimeMode;
-        pendingNewsBroadcastPrompt = null;
+        clearPendingNewsBroadcast();
         pendingNewsQuestion = realtimeMode ? text : null;
         pendingNewsToolAfterAck = false;
         latestWeatherFact = "";
         pendingRealtimeWeatherAnswer = false;
-        pendingWeatherBroadcastPrompt = null;
+        clearPendingWeatherBroadcast();
         if (!realtimeMode) {
             addChatMessage("assistant", "稍等，我看一下新闻热点。");
             renderMessages();
@@ -1766,12 +1805,12 @@ public class MainActivity extends Activity {
     private void startNewsToolFromBackground(String question) {
         latestNewsFact = "";
         pendingRealtimeNewsAnswer = true;
-        pendingNewsBroadcastPrompt = null;
+        clearPendingNewsBroadcast();
         pendingNewsQuestion = question;
         pendingNewsToolAfterAck = false;
         latestWeatherFact = "";
         pendingRealtimeWeatherAnswer = false;
-        pendingWeatherBroadcastPrompt = null;
+        clearPendingWeatherBroadcast();
         interruptRealtimePlayback("background_tool_daily_news");
         discardActiveAssistantMessage();
         removeAssistantReplyAfterLastUser();
@@ -1866,7 +1905,7 @@ public class MainActivity extends Activity {
         }
         latestWeatherFact = "";
         pendingRealtimeWeatherAnswer = false;
-        pendingWeatherBroadcastPrompt = null;
+        clearPendingWeatherBroadcast();
         pendingRealtimeNewsAnswer = false;
         latestNewsFact = "";
         if (!realtimeMode) {
@@ -2022,31 +2061,11 @@ public class MainActivity extends Activity {
     }
 
     private void queueRealtimeWeatherBroadcast(String prompt) {
-        pendingWeatherBroadcastPrompt = prompt;
-        pushRealtimeWeatherFact();
-        if (!"speaking".equals(state) && !isResponsePendingState(state)) {
-            schedulePendingWeatherBroadcast(1000);
-        }
+        if (pendingBroadcasts != null) pendingBroadcasts.queueWeather(prompt);
     }
 
     private void schedulePendingWeatherBroadcast(long delayMs) {
-        int seq = ++pendingWeatherBroadcastSeq;
-        main.postDelayed(() -> sendPendingWeatherBroadcast(seq), delayMs);
-    }
-
-    private void sendPendingWeatherBroadcast(int seq) {
-        if (seq != pendingWeatherBroadcastSeq) return;
-        if (pendingWeatherBroadcastPrompt == null) return;
-        if (!realtime.isOpen()) {
-            realtime.connect();
-            schedulePendingWeatherBroadcast(1400);
-            return;
-        }
-        String prompt = pendingWeatherBroadcastPrompt;
-        pendingWeatherBroadcastPrompt = null;
-        pendingWeatherBroadcastSeq++;
-        realtime.sendInputText(prompt);
-        setState("processing");
+        if (pendingBroadcasts != null) pendingBroadcasts.scheduleWeather(delayMs);
     }
 
     private void pushRealtimeNewsFact() {
@@ -2059,38 +2078,28 @@ public class MainActivity extends Activity {
     }
 
     private void queueRealtimeNewsBroadcast(String prompt) {
-        pendingNewsBroadcastPrompt = prompt;
         toolRouteSeq++;
-        pushRealtimeNewsFact();
-        if (!"speaking".equals(state) && !isResponsePendingState(state)) {
-            schedulePendingNewsBroadcast(1000);
-        }
+        if (pendingBroadcasts != null) pendingBroadcasts.queueNews(prompt);
     }
 
     private void schedulePendingNewsBroadcast(long delayMs) {
-        int seq = ++pendingNewsBroadcastSeq;
-        main.postDelayed(() -> sendPendingNewsBroadcast(seq), delayMs);
+        if (pendingBroadcasts != null) pendingBroadcasts.scheduleNews(delayMs);
     }
 
-    private void sendPendingNewsBroadcast(int seq) {
-        if (seq != pendingNewsBroadcastSeq) return;
-        if (pendingNewsBroadcastPrompt == null) return;
-        Log.d(TAG, "send pending news broadcast state=" + state);
-        if ("speaking".equals(state) || isResponsePendingState(state)) {
-            schedulePendingNewsBroadcast(600);
-            return;
-        }
-        if (!realtime.isOpen()) {
-            realtime.connect();
-            schedulePendingNewsBroadcast(1400);
-            return;
-        }
-        pushRealtimeNewsFact();
-        String prompt = pendingNewsBroadcastPrompt;
-        pendingNewsBroadcastPrompt = null;
-        pendingNewsBroadcastSeq++;
-        realtime.sendInputText(prompt);
-        setState("processing");
+    private boolean hasPendingWeatherBroadcast() {
+        return pendingBroadcasts != null && pendingBroadcasts.hasPendingWeather();
+    }
+
+    private boolean hasPendingNewsBroadcast() {
+        return pendingBroadcasts != null && pendingBroadcasts.hasPendingNews();
+    }
+
+    private void clearPendingWeatherBroadcast() {
+        if (pendingBroadcasts != null) pendingBroadcasts.clearWeather();
+    }
+
+    private void clearPendingNewsBroadcast() {
+        if (pendingBroadcasts != null) pendingBroadcasts.clearNews();
     }
 
     private void queueToolTtsPlayback(String source, String text) {
@@ -2286,7 +2295,7 @@ public class MainActivity extends Activity {
             stopToolTtsPlayback(true);
             setState("ready");
         }
-        if ("news_tool".equals(state) || pendingNewsBroadcastPrompt != null ||
+        if ("news_tool".equals(state) || hasPendingNewsBroadcast() ||
                 pendingRealtimeNewsAnswer || latestVoiceNews != null) {
             interruptNewsPlayback();
             return;
@@ -2313,7 +2322,7 @@ public class MainActivity extends Activity {
     }
 
     private void interruptNewsPlayback() {
-        pendingNewsBroadcastPrompt = null;
+        clearPendingNewsBroadcast();
         stopToolTtsPlayback(true);
         pendingRealtimeNewsAnswer = false;
         pendingNewsToolAfterAck = false;
@@ -2501,7 +2510,7 @@ public class MainActivity extends Activity {
             }
             return;
         }
-        if (pendingWeatherBroadcastPrompt != null) {
+        if (hasPendingWeatherBroadcast()) {
             schedulePendingWeatherBroadcast(400);
             return;
         }
@@ -2776,7 +2785,7 @@ public class MainActivity extends Activity {
 
     private String voiceButtonText() {
         if ((ttsPlayer != null && ttsPlayer.isPlaying()) || hasPendingToolTtsPlayback()) return "■";
-        if ("news_tool".equals(state) || pendingNewsBroadcastPrompt != null ||
+        if ("news_tool".equals(state) || hasPendingNewsBroadcast() ||
                 pendingRealtimeNewsAnswer || latestVoiceNews != null) return "■";
         return "♩";
     }
@@ -3285,11 +3294,11 @@ public class MainActivity extends Activity {
         if (maybeStartToolTtsAfterRealtimeStopped()) {
             return;
         }
-        if (pendingWeatherBroadcastPrompt != null) {
+        if (hasPendingWeatherBroadcast()) {
             schedulePendingWeatherBroadcast(900);
             return;
         }
-        if (pendingNewsBroadcastPrompt != null) {
+        if (hasPendingNewsBroadcast()) {
             schedulePendingNewsBroadcast(250);
             return;
         }

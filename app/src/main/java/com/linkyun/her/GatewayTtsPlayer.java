@@ -30,8 +30,9 @@ final class GatewayTtsPlayer {
     }
 
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
-    private static final String STREAMING_FORMAT = "pcm";
-    private static final String FALLBACK_FORMAT = "mp3";
+    private static final String OPUS_FORMAT = "opus";
+    private static final String PCM_FORMAT = "pcm";
+    private static final String MP3_FORMAT = "mp3";
     private static final int STREAM_SAMPLE_RATE = 24000;
     private static final int STREAM_CHUNK_BYTES = 4096;
 
@@ -75,11 +76,10 @@ final class GatewayTtsPlayer {
             main.post(() -> listener.onError(id, "Missing AGENTLLM_API_KEY"));
             return;
         }
-        requestSpeech(run, id, text, STREAMING_FORMAT, true, listener);
+        requestSpeech(run, id, text, PCM_FORMAT, listener);
     }
 
-    private void requestSpeech(int run, String id, String text, String responseFormat,
-            boolean allowFallback, Listener listener) {
+    private void requestSpeech(int run, String id, String text, String responseFormat, Listener listener) {
         JSONObject body = new JSONObject();
         try {
             body.put("model", model);
@@ -110,21 +110,28 @@ final class GatewayTtsPlayer {
                 if (!response.isSuccessful()) {
                     String responseText = response.body() == null ? "" : response.body().string();
                     Log.d(tag, "gateway tts http failed id=" + id + " format=" + responseFormat + " code=" + response.code());
-                    if (allowFallback) {
+                    String nextFormat = nextFallbackFormat(responseFormat);
+                    if (nextFormat != null) {
                         call = null;
-                        requestSpeech(run, id, text, FALLBACK_FORMAT, false, listener);
+                        requestSpeech(run, id, text, nextFormat, listener);
                     } else {
                         main.post(() -> listener.onError(id, "HTTP " + response.code() + " " + responseText));
                     }
                     return;
                 }
-                if (STREAMING_FORMAT.equals(responseFormat)) {
+                if (PCM_FORMAT.equals(responseFormat)) {
                     streamPcmResponse(run, id, text, response, listener);
                 } else {
-                    playMp3Response(run, id, text, response, listener);
+                    playFileResponse(run, id, text, responseFormat, response, listener);
                 }
             }
         });
+    }
+
+    private String nextFallbackFormat(String responseFormat) {
+        if (PCM_FORMAT.equals(responseFormat)) return OPUS_FORMAT;
+        if (OPUS_FORMAT.equals(responseFormat)) return MP3_FORMAT;
+        return null;
     }
 
     void stop() {
@@ -154,17 +161,24 @@ final class GatewayTtsPlayer {
             streamTrack = track;
             playing = true;
             byte[] buffer = new byte[STREAM_CHUNK_BYTES];
+            byte[] alignedBuffer = new byte[STREAM_CHUNK_BYTES + 1];
+            PcmSampleBuffer sampleBuffer = new PcmSampleBuffer();
             int read;
             while (run == generation && (read = in.read(buffer)) != -1) {
                 if (read == 0) continue;
+                int alignedBytes = sampleBuffer.copyAligned(buffer, read, alignedBuffer);
+                if (alignedBytes == 0) continue;
                 if (!started) {
                     started = true;
                     startedAtMs = System.currentTimeMillis();
                     Log.d(tag, "gateway tts stream started id=" + id);
                     main.post(() -> listener.onStarted(id, text));
                 }
-                int written = track.write(buffer, 0, read);
+                int written = track.write(alignedBuffer, 0, alignedBytes);
                 if (written > 0) totalBytes += written;
+            }
+            if (sampleBuffer.hasPendingByte()) {
+                Log.d(tag, "gateway tts stream discarded dangling pcm byte id=" + id);
             }
             if (run == generation && started) {
                 waitForStreamDrain(run, startedAtMs, totalBytes);
@@ -226,7 +240,8 @@ final class GatewayTtsPlayer {
         }
     }
 
-    private void playMp3Response(int run, String id, String text, Response response, Listener listener) throws IOException {
+    private void playFileResponse(int run, String id, String text, String responseFormat,
+            Response response, Listener listener) throws IOException {
         byte[] audioBytes;
         try (Response ignored = response) {
             audioBytes = response.body() == null ? new byte[0] : response.body().bytes();
@@ -237,16 +252,21 @@ final class GatewayTtsPlayer {
             main.post(() -> listener.onError(id, "empty audio"));
             return;
         }
-        Log.d(tag, "gateway tts audio ready id=" + id + " bytes=" + audioBytes.length);
-        File file = new File(cacheDir, "tts_" + run + ".mp3");
+        Log.d(tag, "gateway tts audio ready id=" + id + " format=" + responseFormat + " bytes=" + audioBytes.length);
+        File file = new File(cacheDir, "tts_" + run + "." + fileExtension(responseFormat));
         try (FileOutputStream out = new FileOutputStream(file)) {
             out.write(audioBytes);
         }
         call = null;
-        main.post(() -> playFile(run, id, text, file, listener));
+        main.post(() -> playFile(run, id, text, responseFormat, file, listener));
     }
 
-    private void playFile(int run, String id, String text, File file, Listener listener) {
+    private String fileExtension(String responseFormat) {
+        if (OPUS_FORMAT.equals(responseFormat)) return "ogg";
+        return "mp3";
+    }
+
+    private void playFile(int run, String id, String text, String responseFormat, File file, Listener listener) {
         if (run != generation) return;
         stopPlayer();
         try {
@@ -260,20 +280,30 @@ final class GatewayTtsPlayer {
             });
             player.setOnErrorListener((mp, what, extra) -> {
                 if (run != generation) return true;
-                Log.d(tag, "gateway tts playback error what=" + what + " extra=" + extra);
+                Log.d(tag, "gateway tts playback error format=" + responseFormat + " what=" + what + " extra=" + extra);
                 stopPlayer();
-                listener.onError(id, "playback error");
+                String nextFormat = nextFallbackFormat(responseFormat);
+                if (nextFormat != null) {
+                    requestSpeech(run, id, text, nextFormat, listener);
+                } else {
+                    listener.onError(id, "playback error");
+                }
                 return true;
             });
             player.prepare();
             playing = true;
-            Log.d(tag, "gateway tts playback started id=" + id);
+            Log.d(tag, "gateway tts playback started id=" + id + " format=" + responseFormat);
             listener.onStarted(id, text);
             player.start();
         } catch (Exception error) {
-            Log.d(tag, "gateway tts playback failed: " + error.getMessage());
+            Log.d(tag, "gateway tts playback failed format=" + responseFormat + ": " + error.getMessage());
             stopPlayer();
-            listener.onError(id, error.getMessage());
+            String nextFormat = nextFallbackFormat(responseFormat);
+            if (nextFormat != null) {
+                requestSpeech(run, id, text, nextFormat, listener);
+            } else {
+                listener.onError(id, error.getMessage());
+            }
         }
     }
 

@@ -1,14 +1,15 @@
 package com.linkyun.her;
 
 import android.os.Handler;
-import android.text.Html;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -17,26 +18,9 @@ import okhttp3.Request;
 import okhttp3.Response;
 
 final class NewsTool {
-    private static final String SOURCE_URL = "https://agentnews.linkyun.co/";
+    private static final String BASE_URL = "https://agentnews.linkyun.co";
+    private static final String SOURCE_URL = BASE_URL + "/api/v1/feed?lang=zh&limit=8&format=json";
     private static final int MAX_ITEMS = 8;
-    private static final Pattern CARD_START_PATTERN = Pattern.compile(
-            "<a\\s+class=\"card\"\\s+href=\"([^\"]+)\"[^>]*>",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern TITLE_PATTERN = Pattern.compile(
-            "<h2>(.*?)</h2>",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern SUMMARY_PATTERN = Pattern.compile(
-            "<p\\s+class=\"summary\"[^>]*>(.*?)</p>",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern META_PATTERN = Pattern.compile(
-            "<div\\s+class=\"meta\"[^>]*>(.*?)</div>",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern PILL_PATTERN = Pattern.compile(
-            "<span\\s+class=\"pill\"[^>]*>(.*?)</span>",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-    private static final Pattern TAG_PATTERN = Pattern.compile(
-            "<a\\s+class=\"tag\"[^>]*>(.*?)</a>",
-            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     interface CallbackResult {
         void onSuccess(NewsResult result);
@@ -67,7 +51,13 @@ final class NewsTool {
                     main.post(() -> callback.onError("新闻热点接口失败：" + response.code()));
                     return;
                 }
-                List<NewsItem> items = parseItems(body);
+                List<NewsItem> items;
+                try {
+                    items = parseFeedItems(body);
+                } catch (JSONException error) {
+                    main.post(() -> callback.onError("新闻热点解析失败：" + error.getMessage()));
+                    return;
+                }
                 if (items.isEmpty()) {
                     main.post(() -> callback.onError("暂时没有读到新闻热点。"));
                     return;
@@ -78,81 +68,54 @@ final class NewsTool {
         });
     }
 
-    private static List<NewsItem> parseItems(String html) {
-        if (html == null || html.trim().isEmpty()) return Collections.emptyList();
+    static List<NewsItem> parseFeedItems(String json) throws JSONException {
+        if (json == null || json.trim().isEmpty()) return Collections.emptyList();
+        JSONObject feed = new JSONObject(json);
+        JSONArray array = feed.optJSONArray("items");
+        if (array == null) return Collections.emptyList();
         List<NewsItem> items = new ArrayList<>();
-        Matcher matcher = CARD_START_PATTERN.matcher(html);
-        int searchFrom = 0;
-        while (matcher.find(searchFrom) && items.size() < MAX_ITEMS) {
-            String url = normalizeUrl(matcher.group(1));
-            int contentStart = matcher.end();
-            int contentEnd = nextCardStart(html, contentStart);
-            String card = html.substring(contentStart, contentEnd);
-            String title = firstCleanMatch(TITLE_PATTERN, card);
-            String summary = firstCleanMatch(SUMMARY_PATTERN, card);
-            String metaHtml = firstRawMatch(META_PATTERN, card);
-            searchFrom = contentEnd;
+        for (int i = 0; i < array.length() && items.size() < MAX_ITEMS; i++) {
+            JSONObject item = array.optJSONObject(i);
+            if (item == null) continue;
+            String title = cleanText(item.optString("title", ""));
             if (title.isEmpty()) continue;
             items.add(new NewsItem(
                     title,
-                    summary,
-                    dateFromMeta(metaHtml),
-                    categoryFromMeta(metaHtml),
-                    tagsFromMeta(metaHtml),
-                    url));
+                    cleanText(item.optString("summary", "")),
+                    dateFromUpdatedAt(item.optString("updated_at", "")),
+                    cleanText(item.optString("type", "")),
+                    tagsFromJson(item.optJSONArray("tags")),
+                    normalizeUrl(item.optString("get", ""))));
         }
         return items;
-    }
-
-    private static int nextCardStart(String html, int from) {
-        Matcher next = CARD_START_PATTERN.matcher(html);
-        if (next.find(from)) return next.start();
-        int mainEnd = html.indexOf("</main>", from);
-        return mainEnd >= 0 ? mainEnd : html.length();
     }
 
     private static String normalizeUrl(String href) {
         if (href == null) return SOURCE_URL;
         if (href.startsWith("http://") || href.startsWith("https://")) return href;
-        if (href.startsWith("/")) return "https://agentnews.linkyun.co" + href;
-        return SOURCE_URL + href;
+        if (href.startsWith("/")) return BASE_URL + href;
+        return BASE_URL + "/" + href;
     }
 
-    private static String firstRawMatch(Pattern pattern, String value) {
-        Matcher matcher = pattern.matcher(value == null ? "" : value);
-        return matcher.find() ? matcher.group(1) : "";
+    private static String dateFromUpdatedAt(String updatedAt) {
+        String value = cleanText(updatedAt);
+        int split = value.indexOf('T');
+        return split > 0 ? value.substring(0, split) : value;
     }
 
-    private static String firstCleanMatch(Pattern pattern, String value) {
-        return cleanHtml(firstRawMatch(pattern, value));
-    }
-
-    private static String dateFromMeta(String metaHtml) {
-        String meta = cleanHtml(metaHtml);
-        int split = meta.indexOf('·');
-        return split > 0 ? meta.substring(0, split).trim() : "";
-    }
-
-    private static String categoryFromMeta(String metaHtml) {
-        Matcher matcher = PILL_PATTERN.matcher(metaHtml == null ? "" : metaHtml);
-        return matcher.find() ? cleanHtml(matcher.group(1)) : "";
-    }
-
-    private static List<String> tagsFromMeta(String metaHtml) {
+    private static List<String> tagsFromJson(JSONArray array) {
+        if (array == null) return Collections.emptyList();
         List<String> tags = new ArrayList<>();
-        Matcher matcher = TAG_PATTERN.matcher(metaHtml == null ? "" : metaHtml);
-        while (matcher.find() && tags.size() < 5) {
-            String tag = cleanHtml(matcher.group(1));
+        for (int i = 0; i < array.length() && tags.size() < 5; i++) {
+            String tag = cleanText(array.optString(i, ""));
             if (!tag.isEmpty()) tags.add(tag);
         }
         return tags;
     }
 
-    private static String cleanHtml(String value) {
+    private static String cleanText(String value) {
         if (value == null) return "";
-        return Html.fromHtml(value, Html.FROM_HTML_MODE_LEGACY)
-                .toString()
-                .replace('\u00A0', ' ')
+        return value.replace('\u00A0', ' ')
                 .replaceAll("\\s+", " ")
                 .trim();
     }
