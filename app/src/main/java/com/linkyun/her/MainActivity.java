@@ -140,7 +140,7 @@ public class MainActivity extends Activity {
                 setState("ready");
                 if (maybeStartToolTtsAfterRealtimeStopped()) return;
             }
-            if (toolTtsPlaybackActive) {
+            if (hasActiveToolTtsPlayback()) {
                 setState("speaking");
                 return;
             }
@@ -165,6 +165,7 @@ public class MainActivity extends Activity {
     private AgentApiClient agents;
     private WeatherTool weatherTool;
     private NewsTool newsTool;
+    private VoicePipelineManager voicePipeline;
     private MediaSession headsetMediaSession;
     private HerUi ui;
 
@@ -198,8 +199,6 @@ public class MainActivity extends Activity {
     private boolean pendingNewsToolAfterAck = false;
     private boolean discardRealtimeAudioUntilDone = false;
     private boolean realtimeOutputActive = false;
-    private boolean waitingForRealtimeStopBeforeToolTts = false;
-    private boolean toolTtsPlaybackActive = false;
     private boolean demoMode = false;
     private boolean pendingWeatherRealtime = false;
     private boolean compactInProgress = false;
@@ -216,8 +215,6 @@ public class MainActivity extends Activity {
     private String pendingNewsQuestion = null;
     private String pendingWeatherBroadcastPrompt = null;
     private String pendingNewsBroadcastPrompt = null;
-    private String pendingToolTtsId = null;
-    private String pendingToolTtsText = null;
     private String activeAssistantId = null;
     private WeatherTool.WeatherResult latestVoiceWeather = null;
     private NewsTool.NewsResult latestVoiceNews = null;
@@ -266,6 +263,7 @@ public class MainActivity extends Activity {
         ttsPlayer = new GatewayTtsPlayer(TAG, llmHttp, main, getCacheDir(),
                 BuildConfig.AGENTLLM_BASE_URL, BuildConfig.AGENTLLM_API_KEY,
                 "doubao-tts", DEFAULT_VOICE);
+        voicePipeline = createVoicePipelineManager();
         voices.add(new Voice(DEFAULT_VOICE, "Doris Clone", "female"));
         voices.add(new Voice("zh_female_roumeinvyou_emo_v2_mars_bigtts", "柔美女友（多情感）", "female"));
         voices.add(new Voice("zh_female_gaolengyujie_emo_v2_mars_bigtts", "高冷御姐（多情感）", "female"));
@@ -300,6 +298,72 @@ public class MainActivity extends Activity {
         }
         loadVoices();
         handleVoiceCommandIntent(getIntent());
+    }
+
+    private VoicePipelineManager createVoicePipelineManager() {
+        return new VoicePipelineManager((runnable, delayMs) -> main.postDelayed(runnable, delayMs),
+                new VoicePipelineManager.Host() {
+                    @Override public boolean isRealtimePlaybackActive() {
+                        return realtimeOutputActive;
+                    }
+
+                    @Override public boolean shouldDeferStart() {
+                        return "speaking".equals(state) || isResponsePendingState(state);
+                    }
+
+                    @Override public boolean isSpeakingState() {
+                        return "speaking".equals(state);
+                    }
+
+                    @Override public void logToolTts(String message) {
+                        Log.d(TAG, "tool tts " + message);
+                    }
+
+                    @Override public void interruptRealtimePlayback(String reason, boolean discardUntilDone) {
+                        MainActivity.this.interruptRealtimePlayback(reason, discardUntilDone);
+                    }
+
+                    @Override public void prepareToolTtsPlayback() {
+                        pendingMicStart = false;
+                        realtimeOutputActive = false;
+                        if (mic.running || inputAudioOpen) stopInputAudio("speaking");
+                        if (realtime.isOpen()) interruptRealtimePlayback("tool_tts_playback", true);
+                        player.stop();
+                        setState("speaking");
+                    }
+
+                    @Override public void playToolTts(String id, String text, ToolTtsCoordinator.PlaybackListener listener) {
+                        Log.d(TAG, "tool tts request id=" + id + " len=" + text.length());
+                        ttsPlayer.play(id, text, new GatewayTtsPlayer.Listener() {
+                            @Override public void onStarted(String startedId, String spokenText) {
+                                listener.onStarted(startedId, spokenText);
+                            }
+
+                            @Override public void onCompleted(String completedId) {
+                                listener.onCompleted(completedId);
+                            }
+
+                            @Override public void onError(String failedId, String message) {
+                                listener.onError(failedId, message);
+                            }
+                        });
+                    }
+
+                    @Override public void onToolTtsStarted(String id, String text) {
+                        Log.d(TAG, "tool tts started id=" + id + " len=" + text.length());
+                        setState("speaking");
+                        updateVoiceHome();
+                    }
+
+                    @Override public void onToolTtsFinished(String id) {
+                        if (id != null) Log.d(TAG, "tool tts finished id=" + id);
+                        setState("ready");
+                    }
+
+                    @Override public void resumeListeningAfterToolTts(long delayMs) {
+                        MainActivity.this.resumeListeningAfterToolTts(delayMs);
+                    }
+                });
     }
 
     @Override
@@ -978,6 +1042,7 @@ public class MainActivity extends Activity {
         mic.stop();
         player.stop();
         realtime.close();
+        stopToolTtsPlayback(false);
         deleteFile(USER_MEMORY_FILE);
         deleteFile(AGENT_MEMORY_FILE);
         if (memoryStore != null) memoryStore.resetAll();
@@ -1310,6 +1375,7 @@ public class MainActivity extends Activity {
         mic.stop();
         player.stop();
         realtime.close();
+        stopToolTtsPlayback(false);
         inputAudioOpen = false;
         pendingMicStart = false;
         pendingText = null;
@@ -1975,27 +2041,15 @@ public class MainActivity extends Activity {
     }
 
     private void queueToolTtsPlayback(String source, String text) {
-        if (text == null || text.trim().isEmpty()) return;
-        pendingToolTtsId = source + "-" + System.currentTimeMillis();
-        pendingToolTtsText = text.trim();
-        Log.d(TAG, "queue tool tts source=" + source + " state=" + state + " len=" + pendingToolTtsText.length());
-        if ("speaking".equals(state) || isResponsePendingState(state)) {
-            main.postDelayed(() -> {
-                if (hasPendingToolTtsPlayback() && !"speaking".equals(state)) {
-                    startPendingToolTtsPlayback();
-                }
-            }, 3200);
-            return;
-        }
-        startPendingToolTtsPlayback();
+        if (voicePipeline != null) voicePipeline.queueToolTts(source, text);
     }
 
     private boolean hasPendingToolTtsPlayback() {
-        return pendingToolTtsText != null && !pendingToolTtsText.trim().isEmpty();
+        return voicePipeline != null && voicePipeline.hasPendingToolTts();
     }
 
     private boolean hasActiveToolTtsPlayback() {
-        return toolTtsPlaybackActive || hasPendingToolTtsPlayback() || waitingForRealtimeStopBeforeToolTts;
+        return voicePipeline != null && voicePipeline.hasActiveToolTts();
     }
 
     private void startPendingToolTtsPlayback() {
@@ -2003,30 +2057,7 @@ public class MainActivity extends Activity {
     }
 
     private void startPendingToolTtsPlayback(boolean force) {
-        if (!hasPendingToolTtsPlayback()) return;
-        if (!force && isRealtimePlaybackActive()) {
-            Log.d(TAG, "tool tts waiting for realtime stop state=" + state + " realtimeOutputActive=" + realtimeOutputActive);
-            waitingForRealtimeStopBeforeToolTts = true;
-            interruptRealtimePlayback("tool_tts_playback");
-            main.postDelayed(() -> {
-                if (hasPendingToolTtsPlayback()) {
-                    Log.d(TAG, "tool tts force start after realtime interrupt state=" + state + " realtimeOutputActive=" + realtimeOutputActive);
-                    startPendingToolTtsPlayback(true);
-                }
-            }, 220);
-            return;
-        }
-        waitingForRealtimeStopBeforeToolTts = false;
-        realtimeOutputActive = false;
-        String id = pendingToolTtsId;
-        String text = pendingToolTtsText;
-        pendingToolTtsId = null;
-        pendingToolTtsText = null;
-        playToolTts(id, text);
-    }
-
-    private boolean isRealtimePlaybackActive() {
-        return realtimeOutputActive || "speaking".equals(state);
+        if (voicePipeline != null) voicePipeline.startPendingToolTts(force);
     }
 
     private void interruptRealtimePlayback(String reason) {
@@ -2045,42 +2076,7 @@ public class MainActivity extends Activity {
 
     private boolean maybeStartToolTtsAfterRealtimeStopped() {
         realtimeOutputActive = false;
-        if (!hasPendingToolTtsPlayback()) return false;
-        waitingForRealtimeStopBeforeToolTts = false;
-        startPendingToolTtsPlayback();
-        return true;
-    }
-
-    private void playToolTts(String id, String text) {
-        if (id == null) id = "tool-" + System.currentTimeMillis();
-        toolTtsPlaybackActive = true;
-        pendingMicStart = false;
-        if (mic.running || inputAudioOpen) stopInputAudio("speaking");
-        if (realtime.isOpen()) interruptRealtimePlayback("tool_tts_playback", true);
-        player.stop();
-        setState("speaking");
-        Log.d(TAG, "tool tts request id=" + id + " len=" + text.length());
-        ttsPlayer.play(id, text, new GatewayTtsPlayer.Listener() {
-            @Override public void onStarted(String startedId, String spokenText) {
-                Log.d(TAG, "tool tts started id=" + startedId + " len=" + spokenText.length());
-                setState("speaking");
-                updateVoiceHome();
-            }
-
-            @Override public void onCompleted(String completedId) {
-                Log.d(TAG, "tool tts completed id=" + completedId);
-                toolTtsPlaybackActive = false;
-                setState("ready");
-                resumeListeningAfterToolTts(350);
-            }
-
-            @Override public void onError(String failedId, String message) {
-                Log.d(TAG, "tool tts failed: " + message);
-                toolTtsPlaybackActive = false;
-                setState("ready");
-                resumeListeningAfterToolTts(350);
-            }
-        });
+        return voicePipeline != null && voicePipeline.onRealtimeStoppedBeforeToolTts();
     }
 
     private void resumeListeningAfterToolTts(long delayMs) {
@@ -2101,12 +2097,8 @@ public class MainActivity extends Activity {
     }
 
     private void stopToolTtsPlayback(boolean resumeListening) {
-        pendingToolTtsId = null;
-        pendingToolTtsText = null;
-        waitingForRealtimeStopBeforeToolTts = false;
-        toolTtsPlaybackActive = false;
         if (ttsPlayer != null) ttsPlayer.stop();
-        if (resumeListening) resumeListeningAfterToolTts(80);
+        if (voicePipeline != null) voicePipeline.stopToolTts(resumeListening);
     }
 
     private void addWeatherCard(WeatherTool.WeatherResult result) {
@@ -2219,7 +2211,7 @@ public class MainActivity extends Activity {
     private void toggleMic() {
         if (summaryInProgress) return;
         markConversationInteraction(false);
-        if (toolTtsPlaybackActive || (ttsPlayer != null && ttsPlayer.isPlaying())) {
+        if (hasActiveToolTtsPlayback() || (ttsPlayer != null && ttsPlayer.isPlaying())) {
             stopToolTtsPlayback(true);
             setState("ready");
         }
@@ -3180,7 +3172,7 @@ public class MainActivity extends Activity {
             onAssistantDelta(payload.optString("text", ""));
         } else if ("output_audio.start".equals(type) && payload != null) {
             realtimeOutputActive = true;
-            if (toolTtsPlaybackActive || (ttsPlayer != null && ttsPlayer.isPlaying())) {
+            if (hasActiveToolTtsPlayback() || (ttsPlayer != null && ttsPlayer.isPlaying())) {
                 interruptRealtimePlayback("tts_already_playing");
                 return;
             }
