@@ -205,6 +205,8 @@ public class MainActivity extends Activity {
     private int vadSilenceFrames = 0;
     private int vadFrames = 0;
     private int continuousListeningSeq = 0;
+    private int pendingWeatherBroadcastSeq = 0;
+    private int pendingNewsBroadcastSeq = 0;
     private int weatherIntentSeq = 0;
     private int toolRouteSeq = 0;
     private String pendingText = null;
@@ -2028,10 +2030,12 @@ public class MainActivity extends Activity {
     }
 
     private void schedulePendingWeatherBroadcast(long delayMs) {
-        main.postDelayed(this::sendPendingWeatherBroadcast, delayMs);
+        int seq = ++pendingWeatherBroadcastSeq;
+        main.postDelayed(() -> sendPendingWeatherBroadcast(seq), delayMs);
     }
 
-    private void sendPendingWeatherBroadcast() {
+    private void sendPendingWeatherBroadcast(int seq) {
+        if (seq != pendingWeatherBroadcastSeq) return;
         if (pendingWeatherBroadcastPrompt == null) return;
         if (!realtime.isOpen()) {
             realtime.connect();
@@ -2040,6 +2044,7 @@ public class MainActivity extends Activity {
         }
         String prompt = pendingWeatherBroadcastPrompt;
         pendingWeatherBroadcastPrompt = null;
+        pendingWeatherBroadcastSeq++;
         realtime.sendInputText(prompt);
         setState("processing");
     }
@@ -2063,10 +2068,12 @@ public class MainActivity extends Activity {
     }
 
     private void schedulePendingNewsBroadcast(long delayMs) {
-        main.postDelayed(this::sendPendingNewsBroadcast, delayMs);
+        int seq = ++pendingNewsBroadcastSeq;
+        main.postDelayed(() -> sendPendingNewsBroadcast(seq), delayMs);
     }
 
-    private void sendPendingNewsBroadcast() {
+    private void sendPendingNewsBroadcast(int seq) {
+        if (seq != pendingNewsBroadcastSeq) return;
         if (pendingNewsBroadcastPrompt == null) return;
         Log.d(TAG, "send pending news broadcast state=" + state);
         if ("speaking".equals(state) || isResponsePendingState(state)) {
@@ -2081,6 +2088,7 @@ public class MainActivity extends Activity {
         pushRealtimeNewsFact();
         String prompt = pendingNewsBroadcastPrompt;
         pendingNewsBroadcastPrompt = null;
+        pendingNewsBroadcastSeq++;
         realtime.sendInputText(prompt);
         setState("processing");
     }
