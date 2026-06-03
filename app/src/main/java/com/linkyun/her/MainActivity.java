@@ -120,7 +120,7 @@ public class MainActivity extends Activity {
         }
 
         @Override public void onRealtimeAudio(byte[] bytes) {
-            if (discardRealtimeAudioUntilDone) return;
+            if (shouldDiscardRealtimeAudio()) return;
             player.play(bytes);
         }
 
@@ -134,8 +134,7 @@ public class MainActivity extends Activity {
         }
 
         @Override public void onRealtimeClosed() {
-            discardRealtimeAudioUntilDone = false;
-            realtimeOutputActive = false;
+            resetRealtimeOutput();
             if (hasPendingToolTtsPlayback()) {
                 setState("ready");
                 if (maybeStartToolTtsAfterRealtimeStopped()) return;
@@ -197,8 +196,6 @@ public class MainActivity extends Activity {
     private boolean pendingRealtimeWeatherAnswer = false;
     private boolean pendingRealtimeNewsAnswer = false;
     private boolean pendingNewsToolAfterAck = false;
-    private boolean discardRealtimeAudioUntilDone = false;
-    private boolean realtimeOutputActive = false;
     private boolean demoMode = false;
     private boolean pendingWeatherRealtime = false;
     private boolean compactInProgress = false;
@@ -207,6 +204,7 @@ public class MainActivity extends Activity {
     private boolean vadSpeechStarted = false;
     private int vadSilenceFrames = 0;
     private int vadFrames = 0;
+    private int weatherIntentSeq = 0;
     private int toolRouteSeq = 0;
     private String pendingText = null;
     private String pendingWeatherQuestion = null;
@@ -304,7 +302,7 @@ public class MainActivity extends Activity {
         return new VoicePipelineManager((runnable, delayMs) -> main.postDelayed(runnable, delayMs),
                 new VoicePipelineManager.Host() {
                     @Override public boolean isRealtimePlaybackActive() {
-                        return realtimeOutputActive;
+                        return isRealtimeOutputActive();
                     }
 
                     @Override public boolean shouldDeferStart() {
@@ -325,7 +323,7 @@ public class MainActivity extends Activity {
 
                     @Override public void prepareToolTtsPlayback() {
                         pendingMicStart = false;
-                        realtimeOutputActive = false;
+                        resetRealtimeOutput();
                         if (mic.running || inputAudioOpen) stopInputAudio("speaking");
                         if (realtime.isOpen()) interruptRealtimePlayback("tool_tts_playback", true);
                         player.stop();
@@ -362,6 +360,18 @@ public class MainActivity extends Activity {
 
                     @Override public void resumeListeningAfterToolTts(long delayMs) {
                         MainActivity.this.resumeListeningAfterToolTts(delayMs);
+                    }
+
+                    @Override public boolean isExternalTtsPlaying() {
+                        return ttsPlayer != null && ttsPlayer.isPlaying();
+                    }
+
+                    @Override public void enterRealtimeSpeaking(int sampleRate) {
+                        MainActivity.this.enterAssistantSpeaking(sampleRate);
+                    }
+
+                    @Override public void stopRealtimeOutput() {
+                        player.stop();
                     }
                 });
     }
@@ -1812,7 +1822,7 @@ public class MainActivity extends Activity {
         String question = pendingNewsQuestion == null ? "每日新闻热点" : pendingNewsQuestion;
         Log.d(TAG, "news ack done, run tool question=" + question);
         realtime.close();
-        discardRealtimeAudioUntilDone = false;
+        resetRealtimeOutput();
         player.stop();
         setState("news_tool");
         runNewsTool(question, true);
@@ -1865,8 +1875,7 @@ public class MainActivity extends Activity {
 
     private boolean handleWeatherQuestion(String text, boolean realtimeMode) {
         if (!WeatherSkill.isWeatherQuestion(text)) return false;
-        String city = WeatherSkill.extractCity(text);
-        Log.d(TAG, "weather intent hit realtime=" + realtimeMode + " city=" + city + " text=" + text);
+        Log.d(TAG, "weather intent hit realtime=" + realtimeMode + " text=" + text);
         latestWeatherFact = "";
         pendingRealtimeWeatherAnswer = false;
         pendingWeatherBroadcastPrompt = null;
@@ -1877,13 +1886,63 @@ public class MainActivity extends Activity {
             renderMessages();
         } else {
             interruptRealtimePlayback("weather_tool");
+            realtime.close();
+            resetRealtimeOutput();
+            player.stop();
             discardActiveAssistantMessage();
             removeAssistantReplyAfterLastUser();
             addChatMessage("assistant", "稍等，我查一下天气。");
             renderMessages();
         }
-        runWeatherTool(text, city, realtimeMode);
+        resolveWeatherIntentAndRun(text, realtimeMode);
         return true;
+    }
+
+    private void resolveWeatherIntentAndRun(String question, boolean realtimeMode) {
+        if (agents == null || BuildConfig.AGENTLLM_API_KEY.isEmpty()) {
+            Log.d(TAG, "weather intent resolver unavailable, fallback to location");
+            runWeatherTool(question, "", realtimeMode);
+            return;
+        }
+        int seq = ++weatherIntentSeq;
+        JSONObject body;
+        try {
+            body = WeatherIntentResolver.requestBody(BACKGROUND_MODEL, effectiveAgentName(), question);
+        } catch (JSONException error) {
+            runWeatherTool(question, "", realtimeMode);
+            return;
+        }
+        agents.sendSubconscious(body, new AgentApiClient.ReplyCallback() {
+            @Override public void onSuccess(String content) {
+                if (seq != weatherIntentSeq) return;
+                try {
+                    WeatherIntentResolver.Result intent = WeatherIntentResolver.parse(content);
+                    Log.d(TAG, "weather intent city=" + intent.city +
+                            " isWeather=" + intent.isWeatherQuery +
+                            " reason=" + intent.reason +
+                            " text=" + question);
+                    if (!intent.isWeatherQuery) {
+                        setState("ready");
+                        if (realtimeMode) scheduleContinuousListening(180);
+                        return;
+                    }
+                    runWeatherTool(question, intent.city, realtimeMode);
+                } catch (JSONException error) {
+                    Log.d(TAG, "weather intent parse failed content=" + content);
+                    failWeatherIntent(question, realtimeMode);
+                }
+            }
+
+            @Override public void onError(String message) {
+                if (seq != weatherIntentSeq) return;
+                Log.d(TAG, "weather intent failed " + message);
+                failWeatherIntent(question, realtimeMode);
+            }
+        }, "天气意图解析");
+    }
+
+    private void failWeatherIntent(String question, boolean realtimeMode) {
+        weatherCallback(question, realtimeMode).onError("天气意图解析失败，请再说一次城市名。");
     }
 
     private void runWeatherTool(String question, String city, boolean realtimeMode) {
@@ -2065,17 +2124,26 @@ public class MainActivity extends Activity {
     }
 
     private void interruptRealtimePlayback(String reason, boolean discardUntilDone) {
-        if (discardUntilDone) {
-            discardRealtimeAudioUntilDone = true;
-        }
+        if (voicePipeline != null) voicePipeline.markRealtimeOutputInterrupted(discardUntilDone);
         player.stop();
         if (realtime.isOpen()) {
             realtime.sendEvent("input_audio.interrupt", json("reason", reason));
         }
     }
 
+    private boolean isRealtimeOutputActive() {
+        return voicePipeline != null && voicePipeline.isRealtimeOutputActive();
+    }
+
+    private boolean shouldDiscardRealtimeAudio() {
+        return voicePipeline != null && voicePipeline.shouldDiscardRealtimeAudio();
+    }
+
+    private void resetRealtimeOutput() {
+        if (voicePipeline != null) voicePipeline.resetRealtimeOutput();
+    }
+
     private boolean maybeStartToolTtsAfterRealtimeStopped() {
-        realtimeOutputActive = false;
         return voicePipeline != null && voicePipeline.onRealtimeStoppedBeforeToolTts();
     }
 
@@ -2252,7 +2320,7 @@ public class MainActivity extends Activity {
             interruptRealtimePlayback("news_interrupt");
             realtime.close();
         }
-        discardRealtimeAudioUntilDone = false;
+        resetRealtimeOutput();
         player.stop();
         clearVoiceNewsCard(true);
         setState("ready");
@@ -2264,7 +2332,7 @@ public class MainActivity extends Activity {
         if (mic.running || inputAudioOpen) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
         markConversationInteraction(false);
-        discardRealtimeAudioUntilDone = false;
+        resetRealtimeOutput();
         resetVad();
         if (audioLevelView != null) audioLevelView.setLevel(0);
         if (voiceOrbView != null) voiceOrbView.setLevel(0);
@@ -2308,7 +2376,7 @@ public class MainActivity extends Activity {
         asrFinalTimeout = () -> {
             asrFinalTimeout = null;
             if (!"processing".equals(state)) return;
-            if (mic.running || inputAudioOpen || realtimeOutputActive || summaryInProgress) return;
+            if (mic.running || inputAudioOpen || isRealtimeOutputActive() || summaryInProgress) return;
             Log.d(TAG, "asr final timeout, resume listening");
             setState("ready");
             scheduleContinuousListening(80);
@@ -2369,7 +2437,6 @@ public class MainActivity extends Activity {
     }
 
     private void enterAssistantSpeaking(int sampleRate) {
-        realtimeOutputActive = true;
         markInitializationOpeningDeliveredFromRealtime();
         breatheScreenForAssistantReply();
         if (HALF_DUPLEX && (mic.running || inputAudioOpen)) {
@@ -3166,22 +3233,14 @@ public class MainActivity extends Activity {
                 return;
             }
             if (hasActiveToolTtsPlayback() || (ttsPlayer != null && ttsPlayer.isPlaying())) return;
-            if ("tts_streaming".equals(providerState)) enterAssistantSpeaking(0);
+            if ("tts_streaming".equals(providerState) && voicePipeline != null) voicePipeline.onRealtimeOutputStarted(0);
             if ("idle".equals(providerState) || "listening".equals(providerState)) setState(mic.running ? "listening" : "ready");
         } else if ("assistant.text.delta".equals(type) && payload != null) {
             onAssistantDelta(payload.optString("text", ""));
         } else if ("output_audio.start".equals(type) && payload != null) {
-            realtimeOutputActive = true;
-            if (hasActiveToolTtsPlayback() || (ttsPlayer != null && ttsPlayer.isPlaying())) {
-                interruptRealtimePlayback("tts_already_playing");
-                return;
-            }
-            if (!discardRealtimeAudioUntilDone) {
-                enterAssistantSpeaking(payload.optInt("sample_rate", 24000));
-            }
+            if (voicePipeline != null) voicePipeline.onRealtimeOutputStarted(payload.optInt("sample_rate", 24000));
         } else if ("output_audio.done".equals(type)) {
-            discardRealtimeAudioUntilDone = false;
-            realtimeOutputActive = false;
+            if (voicePipeline != null) voicePipeline.onRealtimeOutputDone();
             persistActiveAssistantMessage();
             activeAssistantId = null;
             if (pendingNewsToolAfterAck) {
@@ -3215,9 +3274,7 @@ public class MainActivity extends Activity {
             }
             scheduleContinuousListening(650);
         } else if ("output_audio.stop".equals(type)) {
-            discardRealtimeAudioUntilDone = false;
-            realtimeOutputActive = false;
-            player.stop();
+            if (voicePipeline != null) voicePipeline.onRealtimeOutputStopped();
             persistActiveAssistantMessage();
             activeAssistantId = null;
             if (pendingNewsToolAfterAck) {

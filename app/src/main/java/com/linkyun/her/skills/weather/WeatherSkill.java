@@ -7,8 +7,6 @@ import android.os.Handler;
 import android.os.Looper;
 
 import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 final class WeatherSkill {
     static final long VOICE_CARD_TIMEOUT_MS = 30_000;
@@ -34,21 +32,6 @@ final class WeatherSkill {
         return true;
     }
 
-    static String extractCity(String text) {
-        if (text == null) return "";
-        String normalized = text.replace("的天气", "天气")
-                .replace("天气怎么样", "天气")
-                .replace("天气如何", "天气");
-        Pattern pattern = Pattern.compile("([\\u4e00-\\u9fa5A-Za-z]{2,24})(?:天气|气温|温度|会下雨|下雨)");
-        Matcher matcher = pattern.matcher(normalized);
-        String city = "";
-        while (matcher.find()) {
-            String candidate = cleanCityCandidate(matcher.group(1));
-            if (!candidate.isEmpty()) city = candidate;
-        }
-        return city;
-    }
-
     private static boolean isWeatherFollowup(String value) {
         return value.contains("刚才") ||
                 value.contains("查出来") ||
@@ -71,76 +54,6 @@ final class WeatherSkill {
                 value.contains("怎么样") ||
                 value.contains("如何") ||
                 value.contains("会不会");
-    }
-
-    private static String cleanCityCandidate(String value) {
-        if (value == null) return "";
-        String city = value
-                .replace("帮我重新查一下", "")
-                .replace("帮我再查一下", "")
-                .replace("帮我查一下", "")
-                .replace("帮我查一查", "")
-                .replace("帮我查下", "")
-                .replace("帮我查查", "")
-                .replace("帮我查", "")
-                .replace("查一下", "")
-                .replace("查一查", "")
-                .replace("查下", "")
-                .replace("查查", "")
-                .replace("我想让你", "")
-                .replace("想让你", "")
-                .replace("让你", "")
-                .replace("我想请你", "")
-                .replace("帮我重新", "")
-                .replace("帮我再", "")
-                .replace("重新查", "")
-                .replace("再查", "")
-                .replace("重新", "")
-                .replace("今天", "")
-                .replace("明天", "")
-                .replace("后天", "")
-                .replace("昨天", "")
-                .replace("现在", "")
-                .replace("今晚", "")
-                .replace("晚上", "")
-                .replace("早上", "")
-                .replace("上午", "")
-                .replace("中午", "")
-                .replace("下午", "")
-                .replace("当地", "")
-                .replace("这里", "")
-                .replace("我这边", "")
-                .replace("我这里", "")
-                .replace("请问", "")
-                .replace("你刚才", "")
-                .replace("刚才", "")
-                .replace("可是", "")
-                .replace("我没有看到", "")
-                .replace("没有看到", "")
-                .replace("没看到", "")
-                .replace("小卡片", "")
-                .replace("卡片", "")
-                .trim();
-        if (city.length() > 8 && city.endsWith("的")) city = city.substring(0, city.length() - 1);
-        if (city.endsWith("的")) city = city.substring(0, city.length() - 1);
-        if (city.length() < 2) return "";
-        if (isInvalidCityCandidate(city)) return "";
-        return city;
-    }
-
-    private static boolean isInvalidCityCandidate(String city) {
-        return "天气".equals(city) ||
-                "气温".equals(city) ||
-                "温度".equals(city) ||
-                "当地".equals(city) ||
-                "这里".equals(city) ||
-                "今天".equals(city) ||
-                "明天".equals(city) ||
-                "晚上".equals(city) ||
-                "刚才".equals(city) ||
-                "你刚才".equals(city) ||
-                city.contains("看到") ||
-                city.contains("卡片");
     }
 
     static String promptBlock(String latestWeatherFact, boolean pendingRealtimeWeatherAnswer) {
