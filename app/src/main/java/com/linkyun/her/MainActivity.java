@@ -3241,69 +3241,10 @@ public class MainActivity extends Activity {
             if (voicePipeline != null) voicePipeline.onRealtimeOutputStarted(payload.optInt("sample_rate", 24000));
         } else if ("output_audio.done".equals(type)) {
             if (voicePipeline != null) voicePipeline.onRealtimeOutputDone();
-            persistActiveAssistantMessage();
-            activeAssistantId = null;
-            if (pendingNewsToolAfterAck) {
-                runPendingNewsToolAfterAck();
-                return;
-            }
-            setState("ready");
-            if (maybeStartToolTtsAfterRealtimeStopped()) {
-                return;
-            }
-            if (pendingWeatherBroadcastPrompt != null) {
-                schedulePendingWeatherBroadcast(900);
-                return;
-            }
-            if (pendingNewsBroadcastPrompt != null) {
-                schedulePendingNewsBroadcast(250);
-                return;
-            }
-            pendingRealtimeWeatherAnswer = false;
-            if (pendingRealtimeNewsAnswer) {
-                pendingRealtimeNewsAnswer = false;
-                scheduleVoiceNewsCardTimeout(latestVoiceNews);
-                setState("ready");
-                scheduleContinuousListening(650);
-                return;
-            }
-            pendingRealtimeNewsAnswer = false;
-            if (initializing && initSummaryPending) {
-                finishInitializationWithSummary();
-                return;
-            }
-            scheduleContinuousListening(650);
+            handleRealtimeOutputFinished(false);
         } else if ("output_audio.stop".equals(type)) {
             if (voicePipeline != null) voicePipeline.onRealtimeOutputStopped();
-            persistActiveAssistantMessage();
-            activeAssistantId = null;
-            if (pendingNewsToolAfterAck) {
-                runPendingNewsToolAfterAck();
-                return;
-            }
-            setState("ready");
-            if (maybeStartToolTtsAfterRealtimeStopped()) {
-                return;
-            }
-            if (pendingWeatherBroadcastPrompt != null) {
-                schedulePendingWeatherBroadcast(900);
-                return;
-            }
-            if (pendingNewsBroadcastPrompt != null) {
-                schedulePendingNewsBroadcast(250);
-                return;
-            }
-            pendingRealtimeWeatherAnswer = false;
-            if (pendingRealtimeNewsAnswer) {
-                pendingRealtimeNewsAnswer = false;
-                scheduleVoiceNewsCardTimeout(latestVoiceNews);
-                setState(mic.running ? "listening" : "ready");
-                if (!mic.running && !inputAudioOpen) scheduleContinuousListening(180);
-                return;
-            }
-            pendingRealtimeNewsAnswer = false;
-            setState(mic.running ? "listening" : "ready");
-            if (!mic.running && !inputAudioOpen) scheduleContinuousListening(180);
+            handleRealtimeOutputFinished(true);
         } else if ("memory.snapshot".equals(type) && payload != null) {
             handleMemorySnapshot(payload);
         } else if ("error".equals(type) && payload != null) {
@@ -3316,6 +3257,46 @@ public class MainActivity extends Activity {
             toastError(message);
             setState("error");
         }
+    }
+
+    private void handleRealtimeOutputFinished(boolean stopped) {
+        long resumeDelayMs = stopped ? 180 : 650;
+        boolean canListenImmediately = stopped && (mic.running || inputAudioOpen);
+        boolean shouldScheduleListening = !stopped || (!mic.running && !inputAudioOpen);
+
+        persistActiveAssistantMessage();
+        activeAssistantId = null;
+        if (pendingNewsToolAfterAck) {
+            runPendingNewsToolAfterAck();
+            return;
+        }
+        setState("ready");
+        if (maybeStartToolTtsAfterRealtimeStopped()) {
+            return;
+        }
+        if (pendingWeatherBroadcastPrompt != null) {
+            schedulePendingWeatherBroadcast(900);
+            return;
+        }
+        if (pendingNewsBroadcastPrompt != null) {
+            schedulePendingNewsBroadcast(250);
+            return;
+        }
+        pendingRealtimeWeatherAnswer = false;
+        if (pendingRealtimeNewsAnswer) {
+            pendingRealtimeNewsAnswer = false;
+            scheduleVoiceNewsCardTimeout(latestVoiceNews);
+            if (canListenImmediately) setState("listening");
+            if (shouldScheduleListening) scheduleContinuousListening(resumeDelayMs);
+            return;
+        }
+        pendingRealtimeNewsAnswer = false;
+        if (!stopped && initializing && initSummaryPending) {
+            finishInitializationWithSummary();
+            return;
+        }
+        if (canListenImmediately) setState("listening");
+        if (shouldScheduleListening) scheduleContinuousListening(resumeDelayMs);
     }
 
     private boolean isHiddenInitTrigger(String text) {
