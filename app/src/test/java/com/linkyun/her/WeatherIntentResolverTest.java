@@ -50,4 +50,19 @@ public final class WeatherIntentResolverTest {
         assertTrue(system.contains("一行紧凑 JSON"));
         assertEquals("能不能帮我查一下深圳的天气", messages.getJSONObject(1).getString("content"));
     }
+
+    @Test
+    public void reusesLatestWeatherFactForSameTurnFollowups() {
+        assertTrue(WeatherSkill.shouldReuseLatestFact("今天会下雨吗", true));
+        assertTrue(WeatherSkill.shouldReuseLatestFact("那要带伞吗", true));
+        assertTrue(WeatherSkill.shouldReuseLatestFact("刚才天气查出来了吗", true));
+    }
+
+    @Test
+    public void doesNotReuseLatestWeatherFactForFreshQueries() {
+        assertFalse(WeatherSkill.shouldReuseLatestFact("重新查一下天气", true));
+        assertFalse(WeatherSkill.shouldReuseLatestFact("明天天气怎么样", true));
+        assertFalse(WeatherSkill.shouldReuseLatestFact("北京天气怎么样", true));
+        assertFalse(WeatherSkill.shouldReuseLatestFact("今天会下雨吗", false));
+    }
 }

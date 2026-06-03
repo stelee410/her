@@ -204,6 +204,7 @@ public class MainActivity extends Activity {
     private boolean vadSpeechStarted = false;
     private int vadSilenceFrames = 0;
     private int vadFrames = 0;
+    private int continuousListeningSeq = 0;
     private int weatherIntentSeq = 0;
     private int toolRouteSeq = 0;
     private String pendingText = null;
@@ -696,18 +697,7 @@ public class MainActivity extends Activity {
         if (hasActiveToolTtsPlayback()) return;
         if (mic.running || inputAudioOpen) return;
         if (!isBoundHeadsetConnected()) return;
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            pendingMicStart = true;
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
-            return;
-        }
-        pendingMicStart = true;
-        if (realtime.isOpen()) {
-            pendingMicStart = false;
-            startInputAudio();
-        } else {
-            realtime.connect();
-        }
+        requestVoiceInputStart(true);
     }
 
     private String displayUserName() {
@@ -1213,18 +1203,7 @@ public class MainActivity extends Activity {
             showHeadsetPrompt(true);
             return;
         }
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            pendingMicStart = true;
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
-            return;
-        }
-        pendingMicStart = true;
-        if (!realtime.isOpen()) {
-            realtime.connect();
-        } else {
-            pendingMicStart = false;
-            startInputAudio();
-        }
+        requestVoiceInputStart(true);
     }
 
     private void stopOpeningTts() {
@@ -1876,6 +1855,13 @@ public class MainActivity extends Activity {
     private boolean handleWeatherQuestion(String text, boolean realtimeMode) {
         if (!WeatherSkill.isWeatherQuestion(text)) return false;
         Log.d(TAG, "weather intent hit realtime=" + realtimeMode + " text=" + text);
+        if (realtimeMode && WeatherSkill.shouldReuseLatestFact(text, !latestWeatherFact.trim().isEmpty())) {
+            Log.d(TAG, "weather reuse latest fact text=" + text);
+            pendingRealtimeWeatherAnswer = false;
+            pushRealtimeWeatherFact();
+            setState("processing");
+            return true;
+        }
         latestWeatherFact = "";
         pendingRealtimeWeatherAnswer = false;
         pendingWeatherBroadcastPrompt = null;
@@ -2152,16 +2138,25 @@ public class MainActivity extends Activity {
         main.postDelayed(() -> {
             if (voiceLastTurnView == null) return;
             if (mic.running || inputAudioOpen) return;
-            if (!isBoundHeadsetConnected()) return;
-            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
-            pendingMicStart = true;
-            if (realtime.isOpen()) {
-                pendingMicStart = false;
-                startInputAudio();
-            } else {
-                realtime.connect();
-            }
+            requestVoiceInputStart(false);
         }, delayMs);
+    }
+
+    private void requestVoiceInputStart(boolean requestPermission) {
+        if (mic.running || inputAudioOpen) return;
+        if (!isBoundHeadsetConnected()) return;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingMicStart = true;
+            if (requestPermission) requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            return;
+        }
+        pendingMicStart = true;
+        if (realtime.isOpen()) {
+            pendingMicStart = false;
+            startInputAudio();
+        } else {
+            realtime.connect();
+        }
     }
 
     private void stopToolTtsPlayback(boolean resumeListening) {
@@ -2331,6 +2326,7 @@ public class MainActivity extends Activity {
     private void startInputAudio() {
         if (mic.running || inputAudioOpen) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
+        cancelScheduledContinuousListening();
         markConversationInteraction(false);
         resetRealtimeOutput();
         resetVad();
@@ -2437,6 +2433,7 @@ public class MainActivity extends Activity {
     }
 
     private void enterAssistantSpeaking(int sampleRate) {
+        cancelScheduledContinuousListening();
         markInitializationOpeningDeliveredFromRealtime();
         breatheScreenForAssistantReply();
         if (HALF_DUPLEX && (mic.running || inputAudioOpen)) {
@@ -2460,12 +2457,18 @@ public class MainActivity extends Activity {
 
     private void scheduleContinuousListening(long delayMs) {
         if (!CONTINUOUS_CONVERSATION) return;
+        int seq = ++continuousListeningSeq;
         main.postDelayed(() -> {
+            if (seq != continuousListeningSeq) return;
             if (hasActiveToolTtsPlayback()) return;
             if ("ready".equals(state) && !mic.running && !inputAudioOpen) {
                 startContinuousListening();
             }
         }, delayMs);
+    }
+
+    private void cancelScheduledContinuousListening() {
+        continuousListeningSeq++;
     }
 
     private void onRealtimeReady() {
