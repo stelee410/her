@@ -166,6 +166,7 @@ public class MainActivity extends Activity {
     private NewsTool newsTool;
     private VoicePipelineManager voicePipeline;
     private PendingBroadcastCoordinator pendingBroadcasts;
+    private ToolInteractionCoordinator toolInteractions;
     private MediaSession headsetMediaSession;
     private HerUi ui;
 
@@ -194,9 +195,6 @@ public class MainActivity extends Activity {
     private boolean pendingMicStart = false;
     private boolean pendingVoiceWakeIntent = false;
     private boolean headsetDialogShowing = false;
-    private boolean pendingRealtimeWeatherAnswer = false;
-    private boolean pendingRealtimeNewsAnswer = false;
-    private boolean pendingNewsToolAfterAck = false;
     private boolean demoMode = false;
     private boolean pendingWeatherRealtime = false;
     private boolean compactInProgress = false;
@@ -208,11 +206,11 @@ public class MainActivity extends Activity {
     private int continuousListeningSeq = 0;
     private int weatherIntentSeq = 0;
     private int toolRouteSeq = 0;
+    private int pendingWeatherToken = 0;
     private String pendingText = null;
     private String pendingWeatherQuestion = null;
     private String latestWeatherFact = "";
     private String latestNewsFact = "";
-    private String pendingNewsQuestion = null;
     private String activeAssistantId = null;
     private WeatherTool.WeatherResult latestVoiceWeather = null;
     private NewsTool.NewsResult latestVoiceNews = null;
@@ -263,6 +261,7 @@ public class MainActivity extends Activity {
                 "doubao-tts", DEFAULT_VOICE);
         voicePipeline = createVoicePipelineManager();
         pendingBroadcasts = createPendingBroadcastCoordinator();
+        toolInteractions = createToolInteractionCoordinator();
         voices.add(new Voice(DEFAULT_VOICE, "Doris Clone", "female"));
         voices.add(new Voice("zh_female_roumeinvyou_emo_v2_mars_bigtts", "柔美女友（多情感）", "female"));
         voices.add(new Voice("zh_female_gaolengyujie_emo_v2_mars_bigtts", "高冷御姐（多情感）", "female"));
@@ -416,6 +415,88 @@ public class MainActivity extends Activity {
                         Log.d(TAG, message + " state=" + state);
                     }
                 });
+    }
+
+    private ToolInteractionCoordinator createToolInteractionCoordinator() {
+        return new ToolInteractionCoordinator(new ToolInteractionCoordinator.Host() {
+            @Override public void onNewsStarted(String question, boolean realtimeMode) {
+                latestNewsFact = "";
+                clearPendingNewsBroadcast();
+                latestWeatherFact = "";
+                clearWeatherInteraction();
+                if (!realtimeMode) {
+                    addChatMessage("assistant", "稍等，我看一下新闻热点。");
+                    renderMessages();
+                }
+            }
+
+            @Override public void startNewsAck(String question) {
+                toolRouteSeq++;
+                interruptRealtimePlayback("news_tool_ack", false);
+                activeAssistantId = null;
+                setState("news_ack");
+                if (!realtime.isOpen()) {
+                    realtime.connect();
+                    return;
+                }
+                realtime.sendInputText(NewsSkill.LOOKUP_ACK_PROMPT);
+            }
+
+            @Override public void startNewsFetch(String question, boolean realtimeMode, int token) {
+                if (realtimeMode) {
+                    toolRouteSeq++;
+                    if (realtime.isOpen()) realtime.close();
+                    resetRealtimeOutput();
+                    player.stop();
+                    setState("news_tool");
+                }
+                runNewsTool(question, realtimeMode, token);
+            }
+
+            @Override public void onNewsCompleted(String question, boolean realtimeMode) {
+                Log.d(TAG, "news interaction completed realtime=" + realtimeMode + " question=" + question);
+            }
+
+            @Override public void onNewsInterrupted(String question, boolean realtimeMode) {
+                Log.d(TAG, "news interaction interrupted realtime=" + realtimeMode + " question=" + question);
+            }
+
+            @Override public void onWeatherStarted(String question, boolean realtimeMode) {
+                latestWeatherFact = "";
+                clearPendingWeatherBroadcast();
+                clearNewsInteraction();
+                latestNewsFact = "";
+                if (!realtimeMode) {
+                    addChatMessage("assistant", "稍等，我查一下天气。");
+                    renderMessages();
+                } else {
+                    interruptRealtimePlayback("weather_tool");
+                    realtime.close();
+                    resetRealtimeOutput();
+                    player.stop();
+                    discardActiveAssistantMessage();
+                    removeAssistantReplyAfterLastUser();
+                    addChatMessage("assistant", "稍等，我查一下天气。");
+                    renderMessages();
+                }
+            }
+
+            @Override public void startWeatherFetch(String question, boolean realtimeMode, int token) {
+                resolveWeatherIntentAndRun(question, realtimeMode, token);
+            }
+
+            @Override public void onWeatherCompleted(String question, boolean realtimeMode) {
+                Log.d(TAG, "weather interaction completed realtime=" + realtimeMode + " question=" + question);
+            }
+
+            @Override public void onWeatherInterrupted(String question, boolean realtimeMode) {
+                Log.d(TAG, "weather interaction interrupted realtime=" + realtimeMode + " question=" + question);
+            }
+
+            @Override public void logToolInteraction(String message) {
+                Log.d(TAG, message + " state=" + state);
+            }
+        });
     }
 
     @Override
@@ -617,12 +698,8 @@ public class MainActivity extends Activity {
         stopToolTtsPlayback(true);
         persistActiveAssistantMessage();
         activeAssistantId = null;
-        clearPendingWeatherBroadcast();
-        clearPendingNewsBroadcast();
-        pendingNewsQuestion = null;
-        pendingNewsToolAfterAck = false;
-        pendingRealtimeWeatherAnswer = false;
-        pendingRealtimeNewsAnswer = false;
+        clearNewsInteraction();
+        clearWeatherInteraction();
         if (mic.running || inputAudioOpen) {
             stopInputAudio("ready");
         } else {
@@ -645,16 +722,20 @@ public class MainActivity extends Activity {
         } else if (requestCode == REQ_LOCATION && grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) {
             String question = pendingWeatherQuestion;
             boolean realtimeWeather = pendingWeatherRealtime;
+            int token = pendingWeatherToken;
             pendingWeatherQuestion = null;
             pendingWeatherRealtime = false;
-            if (question != null) runWeatherTool(question, null, realtimeWeather);
+            pendingWeatherToken = 0;
+            if (question != null) runWeatherTool(question, null, realtimeWeather, token);
         } else if (requestCode == REQ_LOCATION) {
             String question = pendingWeatherQuestion;
             boolean realtimeWeather = pendingWeatherRealtime;
+            int token = pendingWeatherToken;
             pendingWeatherQuestion = null;
             pendingWeatherRealtime = false;
+            pendingWeatherToken = 0;
             if (question != null) {
-                weatherCallback(question, realtimeWeather).onError("没有定位权限，请告诉我城市名。");
+                weatherCallback(question, realtimeWeather, token).onError("没有定位权限，请告诉我城市名。");
             }
         }
     }
@@ -1110,14 +1191,9 @@ public class MainActivity extends Activity {
         inputAudioOpen = false;
         pendingMicStart = false;
         pendingText = null;
-        pendingWeatherQuestion = null;
-        clearPendingWeatherBroadcast();
-        pendingRealtimeWeatherAnswer = false;
+        clearWeatherInteraction();
         latestWeatherFact = "";
-        clearPendingNewsBroadcast();
-        pendingNewsQuestion = null;
-        pendingNewsToolAfterAck = false;
-        pendingRealtimeNewsAnswer = false;
+        clearNewsInteraction();
         latestNewsFact = "";
         clearVoiceWeatherCard(false);
         clearVoiceNewsCard(false);
@@ -1409,14 +1485,9 @@ public class MainActivity extends Activity {
         inputAudioOpen = false;
         pendingMicStart = false;
         pendingText = null;
-        pendingWeatherQuestion = null;
-        clearPendingWeatherBroadcast();
-        pendingRealtimeWeatherAnswer = false;
+        clearWeatherInteraction();
         latestWeatherFact = "";
-        clearPendingNewsBroadcast();
-        pendingNewsQuestion = null;
-        pendingNewsToolAfterAck = false;
-        pendingRealtimeNewsAnswer = false;
+        clearNewsInteraction();
         latestNewsFact = "";
         clearVoiceWeatherCard(false);
         clearVoiceNewsCard(false);
@@ -1733,21 +1804,7 @@ public class MainActivity extends Activity {
             return false;
         }
         Log.d(TAG, "news intent hit realtime=" + realtimeMode + " text=" + text);
-        latestNewsFact = "";
-        pendingRealtimeNewsAnswer = realtimeMode;
-        clearPendingNewsBroadcast();
-        pendingNewsQuestion = realtimeMode ? text : null;
-        pendingNewsToolAfterAck = false;
-        latestWeatherFact = "";
-        pendingRealtimeWeatherAnswer = false;
-        clearPendingWeatherBroadcast();
-        if (!realtimeMode) {
-            addChatMessage("assistant", "稍等，我看一下新闻热点。");
-            renderMessages();
-            runNewsTool(text, false);
-        } else {
-            startRealtimeNewsAck(text);
-        }
+        if (toolInteractions != null) toolInteractions.startNews(text, realtimeMode);
         return true;
     }
 
@@ -1803,65 +1860,29 @@ public class MainActivity extends Activity {
     }
 
     private void startNewsToolFromBackground(String question) {
-        latestNewsFact = "";
-        pendingRealtimeNewsAnswer = true;
-        clearPendingNewsBroadcast();
-        pendingNewsQuestion = question;
-        pendingNewsToolAfterAck = false;
-        latestWeatherFact = "";
-        pendingRealtimeWeatherAnswer = false;
-        clearPendingWeatherBroadcast();
         interruptRealtimePlayback("background_tool_daily_news");
         discardActiveAssistantMessage();
         removeAssistantReplyAfterLastUser();
         if (realtime.isOpen()) {
             realtime.close();
         }
-        setState("news_tool");
-        runNewsTool(question, true);
+        if (toolInteractions != null) toolInteractions.startNewsFromBackground(question);
     }
 
-    private void startRealtimeNewsAck(String question) {
-        pendingNewsQuestion = question;
-        pendingNewsToolAfterAck = true;
-        toolRouteSeq++;
-        interruptRealtimePlayback("news_tool_ack", false);
-        activeAssistantId = null;
-        setState("news_ack");
-        if (!realtime.isOpen()) {
-            realtime.connect();
-            return;
-        }
-        realtime.sendInputText(NewsSkill.LOOKUP_ACK_PROMPT);
-    }
-
-    private void runPendingNewsToolAfterAck() {
-        if (!pendingNewsToolAfterAck) return;
-        pendingNewsToolAfterAck = false;
-        toolRouteSeq++;
-        String question = pendingNewsQuestion == null ? "每日新闻热点" : pendingNewsQuestion;
-        Log.d(TAG, "news ack done, run tool question=" + question);
-        realtime.close();
-        resetRealtimeOutput();
-        player.stop();
-        setState("news_tool");
-        runNewsTool(question, true);
-    }
-
-    private void runNewsTool(String question, boolean realtimeMode) {
+    private void runNewsTool(String question, boolean realtimeMode, int token) {
         if (newsTool == null) return;
         Log.d(TAG, "news tool fetch realtime=" + realtimeMode + " question=" + question);
-        newsTool.fetchDaily(newsCallback(question, realtimeMode));
+        newsTool.fetchDaily(newsCallback(question, realtimeMode, token));
     }
 
-    private NewsTool.CallbackResult newsCallback(String question, boolean realtimeMode) {
+    private NewsTool.CallbackResult newsCallback(String question, boolean realtimeMode, int token) {
         return new NewsTool.CallbackResult() {
             @Override public void onSuccess(NewsTool.NewsResult result) {
+                if (toolInteractions != null && !toolInteractions.completeNewsFetch(token)) return;
                 String fact = result.fact(question);
                 Log.d(TAG, "news tool success items=" + result.items.size() + " realtime=" + realtimeMode);
                 latestNewsFact = fact;
                 if (realtimeMode) {
-                    pendingRealtimeNewsAnswer = false;
                     addNewsCard(result);
                     String answer = result.shortAnswer();
                     addChatMessage("assistant", answer);
@@ -1876,10 +1897,10 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onError(String message) {
+                if (toolInteractions != null && !toolInteractions.completeNewsFetch(token)) return;
                 Log.d(TAG, "news tool error realtime=" + realtimeMode + " message=" + message);
                 if (realtimeMode) {
                     latestNewsFact = NewsSkill.failureFact(message);
-                    pendingRealtimeNewsAnswer = false;
                     String answer = "暂时没读到新闻热点，" + message + "。你可以稍后再试一下。";
                     addChatMessage("assistant", answer);
                     renderMessages();
@@ -1898,37 +1919,19 @@ public class MainActivity extends Activity {
         Log.d(TAG, "weather intent hit realtime=" + realtimeMode + " text=" + text);
         if (realtimeMode && WeatherSkill.shouldReuseLatestFact(text, !latestWeatherFact.trim().isEmpty())) {
             Log.d(TAG, "weather reuse latest fact text=" + text);
-            pendingRealtimeWeatherAnswer = false;
+            clearWeatherInteraction();
             pushRealtimeWeatherFact();
             setState("processing");
             return true;
         }
-        latestWeatherFact = "";
-        pendingRealtimeWeatherAnswer = false;
-        clearPendingWeatherBroadcast();
-        pendingRealtimeNewsAnswer = false;
-        latestNewsFact = "";
-        if (!realtimeMode) {
-            addChatMessage("assistant", "稍等，我查一下天气。");
-            renderMessages();
-        } else {
-            interruptRealtimePlayback("weather_tool");
-            realtime.close();
-            resetRealtimeOutput();
-            player.stop();
-            discardActiveAssistantMessage();
-            removeAssistantReplyAfterLastUser();
-            addChatMessage("assistant", "稍等，我查一下天气。");
-            renderMessages();
-        }
-        resolveWeatherIntentAndRun(text, realtimeMode);
+        if (toolInteractions != null) toolInteractions.startWeather(text, realtimeMode);
         return true;
     }
 
-    private void resolveWeatherIntentAndRun(String question, boolean realtimeMode) {
+    private void resolveWeatherIntentAndRun(String question, boolean realtimeMode, int token) {
         if (agents == null || BuildConfig.AGENTLLM_API_KEY.isEmpty()) {
             Log.d(TAG, "weather intent resolver unavailable, fallback to location");
-            runWeatherTool(question, "", realtimeMode);
+            runWeatherTool(question, "", realtimeMode, token);
             return;
         }
         int seq = ++weatherIntentSeq;
@@ -1936,7 +1939,7 @@ public class MainActivity extends Activity {
         try {
             body = WeatherIntentResolver.requestBody(BACKGROUND_MODEL, effectiveAgentName(), question);
         } catch (JSONException error) {
-            runWeatherTool(question, "", realtimeMode);
+            runWeatherTool(question, "", realtimeMode, token);
             return;
         }
         agents.sendSubconscious(body, new AgentApiClient.ReplyCallback() {
@@ -1949,49 +1952,53 @@ public class MainActivity extends Activity {
                             " reason=" + intent.reason +
                             " text=" + question);
                     if (!intent.isWeatherQuery) {
+                        if (toolInteractions != null) toolInteractions.completeWeatherFetch(token);
                         setState("ready");
                         if (realtimeMode) scheduleContinuousListening(180);
                         return;
                     }
-                    runWeatherTool(question, intent.city, realtimeMode);
+                    runWeatherTool(question, intent.city, realtimeMode, token);
                 } catch (JSONException error) {
                     Log.d(TAG, "weather intent parse failed content=" + content);
-                    failWeatherIntent(question, realtimeMode);
+                    failWeatherIntent(question, realtimeMode, token);
                 }
             }
 
             @Override public void onError(String message) {
                 if (seq != weatherIntentSeq) return;
                 Log.d(TAG, "weather intent failed " + message);
-                failWeatherIntent(question, realtimeMode);
+                failWeatherIntent(question, realtimeMode, token);
             }
         }, "天气意图解析");
     }
 
-    private void failWeatherIntent(String question, boolean realtimeMode) {
-        weatherCallback(question, realtimeMode).onError("天气意图解析失败，请再说一次城市名。");
+    private void failWeatherIntent(String question, boolean realtimeMode, int token) {
+        weatherCallback(question, realtimeMode, token).onError("天气意图解析失败，请再说一次城市名。");
     }
 
-    private void runWeatherTool(String question, String city, boolean realtimeMode) {
-        if (weatherTool == null) return;
+    private void runWeatherTool(String question, String city, boolean realtimeMode, int token) {
+        if (weatherTool == null) {
+            weatherCallback(question, realtimeMode, token).onError("天气工具不可用");
+            return;
+        }
         if (city != null && !city.trim().isEmpty()) {
             Log.d(TAG, "weather query city=" + city.trim() + " realtime=" + realtimeMode);
-            weatherTool.queryCity(city.trim(), weatherCallback(question, realtimeMode));
+            weatherTool.queryCity(city.trim(), weatherCallback(question, realtimeMode, token));
             return;
         }
         Log.d(TAG, "weather query current location realtime=" + realtimeMode);
-        requestWeatherForCurrentLocation(question, realtimeMode);
+        requestWeatherForCurrentLocation(question, realtimeMode, token);
     }
 
-    private WeatherTool.CallbackResult weatherCallback(String question, boolean realtimeMode) {
+    private WeatherTool.CallbackResult weatherCallback(String question, boolean realtimeMode, int token) {
         return new WeatherTool.CallbackResult() {
             @Override public void onSuccess(WeatherTool.WeatherResult result) {
+                if (toolInteractions != null && !toolInteractions.completeWeatherFetch(token)) return;
                 String fact = result.fact(question);
                 Log.d(TAG, "weather success place=" + result.placeName + " realtime=" + realtimeMode);
                 latestWeatherFact = fact;
                 addWeatherCard(result);
                 if (realtimeMode) {
-                    pendingRealtimeWeatherAnswer = false;
                     String answer = result.shortAnswer();
                     addChatMessage("assistant", answer);
                     renderMessages();
@@ -2004,10 +2011,10 @@ public class MainActivity extends Activity {
             }
 
             @Override public void onError(String message) {
+                if (toolInteractions != null && !toolInteractions.completeWeatherFetch(token)) return;
                 Log.d(TAG, "weather error realtime=" + realtimeMode + " message=" + message);
                 if (realtimeMode) {
                     latestWeatherFact = WeatherSkill.failureFact(message);
-                    pendingRealtimeWeatherAnswer = false;
                     String answer = "暂时没查到天气，" + message + "。你可以稍后再试，或者告诉我具体城市。";
                     addChatMessage("assistant", answer);
                     renderMessages();
@@ -2021,11 +2028,12 @@ public class MainActivity extends Activity {
         };
     }
 
-    private void requestWeatherForCurrentLocation(String question, boolean realtimeMode) {
+    private void requestWeatherForCurrentLocation(String question, boolean realtimeMode, int token) {
         if (checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
                 checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             pendingWeatherQuestion = question;
             pendingWeatherRealtime = realtimeMode;
+            pendingWeatherToken = token;
             requestPermissions(new String[]{
                     Manifest.permission.ACCESS_COARSE_LOCATION,
                     Manifest.permission.ACCESS_FINE_LOCATION
@@ -2034,20 +2042,20 @@ public class MainActivity extends Activity {
         }
         LocationManager manager = (LocationManager) getSystemService(LOCATION_SERVICE);
         if (manager == null) {
-            weatherCallback(question, realtimeMode).onError("无法读取当前位置");
+            weatherCallback(question, realtimeMode, token).onError("无法读取当前位置");
             return;
         }
         try {
             Location last = WeatherSkill.bestLastLocation(manager);
             if (last != null) {
-                weatherTool.queryLocation(last, weatherCallback(question, realtimeMode));
+                weatherTool.queryLocation(last, weatherCallback(question, realtimeMode, token));
                 return;
             }
             WeatherSkill.requestSingleLocation(manager, main,
-                    location -> weatherTool.queryLocation(location, weatherCallback(question, realtimeMode)),
-                    message -> weatherCallback(question, realtimeMode).onError(message));
+                    location -> weatherTool.queryLocation(location, weatherCallback(question, realtimeMode, token)),
+                    message -> weatherCallback(question, realtimeMode, token).onError(message));
         } catch (SecurityException error) {
-            weatherCallback(question, realtimeMode).onError("没有定位权限");
+            weatherCallback(question, realtimeMode, token).onError("没有定位权限");
         }
     }
 
@@ -2094,12 +2102,42 @@ public class MainActivity extends Activity {
         return pendingBroadcasts != null && pendingBroadcasts.hasPendingNews();
     }
 
+    private boolean isNewsInteractionActive() {
+        return toolInteractions != null && toolInteractions.isNewsActive();
+    }
+
+    private boolean isAwaitingRealtimeNewsAnswer() {
+        return toolInteractions != null && toolInteractions.isAwaitingRealtimeNewsAnswer();
+    }
+
+    private boolean isAwaitingRealtimeWeatherAnswer() {
+        return toolInteractions != null && toolInteractions.isAwaitingRealtimeWeatherAnswer();
+    }
+
+    private boolean isWeatherInteractionActive() {
+        return toolInteractions != null && toolInteractions.isWeatherActive();
+    }
+
     private void clearPendingWeatherBroadcast() {
         if (pendingBroadcasts != null) pendingBroadcasts.clearWeather();
     }
 
     private void clearPendingNewsBroadcast() {
         if (pendingBroadcasts != null) pendingBroadcasts.clearNews();
+    }
+
+    private void clearNewsInteraction() {
+        clearPendingNewsBroadcast();
+        if (toolInteractions != null) toolInteractions.clearNews();
+    }
+
+    private void clearWeatherInteraction() {
+        clearPendingWeatherBroadcast();
+        pendingWeatherQuestion = null;
+        pendingWeatherRealtime = false;
+        pendingWeatherToken = 0;
+        weatherIntentSeq++;
+        if (toolInteractions != null) toolInteractions.clearWeather();
     }
 
     private void queueToolTtsPlayback(String source, String text) {
@@ -2200,7 +2238,7 @@ public class MainActivity extends Activity {
         if (voiceLastTurnView != null) {
             latestVoiceNews = result;
             latestVoiceWeather = null;
-            if (!pendingRealtimeNewsAnswer) scheduleVoiceNewsCardTimeout(result);
+            if (!isAwaitingRealtimeNewsAnswer()) scheduleVoiceNewsCardTimeout(result);
             showVoiceHome();
         } else {
             renderMessages();
@@ -2296,8 +2334,12 @@ public class MainActivity extends Activity {
             setState("ready");
         }
         if ("news_tool".equals(state) || hasPendingNewsBroadcast() ||
-                pendingRealtimeNewsAnswer || latestVoiceNews != null) {
+                isNewsInteractionActive() || latestVoiceNews != null) {
             interruptNewsPlayback();
+            return;
+        }
+        if (hasPendingWeatherBroadcast() || isWeatherInteractionActive() || latestVoiceWeather != null) {
+            interruptWeatherPlayback();
             return;
         }
         if (mic.running || inputAudioOpen) {
@@ -2324,9 +2366,7 @@ public class MainActivity extends Activity {
     private void interruptNewsPlayback() {
         clearPendingNewsBroadcast();
         stopToolTtsPlayback(true);
-        pendingRealtimeNewsAnswer = false;
-        pendingNewsToolAfterAck = false;
-        pendingNewsQuestion = null;
+        if (toolInteractions != null) toolInteractions.interruptNews();
         toolRouteSeq++;
         if (realtime.isOpen()) {
             interruptRealtimePlayback("news_interrupt");
@@ -2335,6 +2375,26 @@ public class MainActivity extends Activity {
         resetRealtimeOutput();
         player.stop();
         clearVoiceNewsCard(true);
+        setState("ready");
+        if (!realtime.isOpen()) realtime.connect();
+        scheduleContinuousListening(300);
+    }
+
+    private void interruptWeatherPlayback() {
+        clearPendingWeatherBroadcast();
+        stopToolTtsPlayback(true);
+        if (toolInteractions != null) toolInteractions.interruptWeather();
+        weatherIntentSeq++;
+        pendingWeatherQuestion = null;
+        pendingWeatherRealtime = false;
+        pendingWeatherToken = 0;
+        if (realtime.isOpen()) {
+            interruptRealtimePlayback("weather_interrupt");
+            realtime.close();
+        }
+        resetRealtimeOutput();
+        player.stop();
+        clearVoiceWeatherCard(true);
         setState("ready");
         if (!realtime.isOpen()) realtime.connect();
         scheduleContinuousListening(300);
@@ -2514,10 +2574,7 @@ public class MainActivity extends Activity {
             schedulePendingWeatherBroadcast(400);
             return;
         }
-        if (pendingNewsToolAfterAck) {
-            interruptRealtimePlayback("news_tool_ack", false);
-            realtime.sendInputText(NewsSkill.LOOKUP_ACK_PROMPT);
-            setState("news_ack");
+        if (toolInteractions != null && toolInteractions.onRealtimeReady()) {
             return;
         }
         if (pendingText != null) {
@@ -2737,6 +2794,7 @@ public class MainActivity extends Activity {
         if (initializing || summaryInProgress) return true;
         if (mic.running || inputAudioOpen) return true;
         if (hasActiveToolTtsPlayback()) return true;
+        if (isWeatherInteractionActive()) return true;
         return "connecting".equals(state) ||
                 "listening".equals(state) ||
                 isResponsePendingState(state) ||
@@ -2773,6 +2831,7 @@ public class MainActivity extends Activity {
     private String stateLabelText() {
         if (summaryInProgress) return "Summarizing";
         if (isResponsePendingState(state)) return "Processing";
+        if (isWeatherInteractionActive()) return "Checking weather";
         if ("news_ack".equals(state)) return "Checking news";
         if ("news_tool".equals(state)) return "Reading agentNews";
         if (!isBoundHeadsetConnected()) {
@@ -2785,8 +2844,9 @@ public class MainActivity extends Activity {
 
     private String voiceButtonText() {
         if ((ttsPlayer != null && ttsPlayer.isPlaying()) || hasPendingToolTtsPlayback()) return "■";
+        if (hasPendingWeatherBroadcast() || isWeatherInteractionActive() || latestVoiceWeather != null) return "■";
         if ("news_tool".equals(state) || hasPendingNewsBroadcast() ||
-                pendingRealtimeNewsAnswer || latestVoiceNews != null) return "■";
+                isNewsInteractionActive() || latestVoiceNews != null) return "■";
         return "♩";
     }
 
@@ -3120,8 +3180,8 @@ public class MainActivity extends Activity {
         String recent = recentDialogueForPrompt();
         return trimForPrompt("你叫 " + effectiveAgentName() + "。\n" +
                 INSTRUCTIONS + "\n" +
-                WeatherSkill.promptBlock(latestWeatherFact, pendingRealtimeWeatherAnswer) +
-                NewsSkill.promptBlock(latestNewsFact, pendingRealtimeNewsAnswer) +
+                WeatherSkill.promptBlock(latestWeatherFact, isAwaitingRealtimeWeatherAnswer()) +
+                NewsSkill.promptBlock(latestNewsFact, isAwaitingRealtimeNewsAnswer()) +
                 "当前动态语气调整：" + dynamicTone + "\n" +
                 "以下是本地 user.md 记忆。你需要把它作为长期用户画像和对话偏好使用，但不要主动朗读或暴露文件内容。\n\n" +
                 userMemory + "\n\n" +
@@ -3286,8 +3346,7 @@ public class MainActivity extends Activity {
 
         persistActiveAssistantMessage();
         activeAssistantId = null;
-        if (pendingNewsToolAfterAck) {
-            runPendingNewsToolAfterAck();
+        if (toolInteractions != null && toolInteractions.onRealtimeOutputFinished()) {
             return;
         }
         setState("ready");
@@ -3302,15 +3361,6 @@ public class MainActivity extends Activity {
             schedulePendingNewsBroadcast(250);
             return;
         }
-        pendingRealtimeWeatherAnswer = false;
-        if (pendingRealtimeNewsAnswer) {
-            pendingRealtimeNewsAnswer = false;
-            scheduleVoiceNewsCardTimeout(latestVoiceNews);
-            if (canListenImmediately) setState("listening");
-            if (shouldScheduleListening) scheduleContinuousListening(resumeDelayMs);
-            return;
-        }
-        pendingRealtimeNewsAnswer = false;
         if (!stopped && initializing && initSummaryPending) {
             finishInitializationWithSummary();
             return;
