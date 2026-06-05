@@ -162,11 +162,12 @@ public class MainActivity extends Activity {
     private HeadsetBindingManager headsets;
     private MemoryStore memoryStore;
     private AgentApiClient agents;
-    private WeatherTool weatherTool;
-    private NewsTool newsTool;
+    private WeatherInteractionHandler weatherHandler;
+    private NewsInteractionHandler newsHandler;
     private VoicePipelineManager voicePipeline;
     private PendingBroadcastCoordinator pendingBroadcasts;
     private ToolInteractionCoordinator toolInteractions;
+    private VoiceInputCoordinator voiceInput;
     private MediaSession headsetMediaSession;
     private HerUi ui;
 
@@ -192,8 +193,6 @@ public class MainActivity extends Activity {
     private boolean ignoreNextInitTrigger = false;
     private int realtimeRetryCount = 0;
     private int initUserTurns = 0;
-    private boolean pendingMicStart = false;
-    private boolean pendingVoiceWakeIntent = false;
     private boolean headsetDialogShowing = false;
     private boolean demoMode = false;
     private boolean pendingWeatherRealtime = false;
@@ -203,7 +202,6 @@ public class MainActivity extends Activity {
     private boolean vadSpeechStarted = false;
     private int vadSilenceFrames = 0;
     private int vadFrames = 0;
-    private int continuousListeningSeq = 0;
     private int weatherIntentSeq = 0;
     private int toolRouteSeq = 0;
     private int pendingWeatherToken = 0;
@@ -254,11 +252,12 @@ public class MainActivity extends Activity {
 
         ui = new HerUi(this);
         agents = new AgentApiClient(llmHttp, main);
-        weatherTool = new WeatherTool(llmHttp, main);
-        newsTool = new NewsTool(llmHttp, main);
+        weatherHandler = new WeatherInteractionHandler(new WeatherTool(llmHttp, main));
+        newsHandler = new NewsInteractionHandler(new NewsTool(llmHttp, main));
         ttsPlayer = new GatewayTtsPlayer(TAG, llmHttp, main, getCacheDir(),
                 BuildConfig.AGENTLLM_BASE_URL, BuildConfig.AGENTLLM_API_KEY,
                 "doubao-tts", DEFAULT_VOICE);
+        voiceInput = createVoiceInputCoordinator();
         voicePipeline = createVoicePipelineManager();
         pendingBroadcasts = createPendingBroadcastCoordinator();
         toolInteractions = createToolInteractionCoordinator();
@@ -298,6 +297,76 @@ public class MainActivity extends Activity {
         handleVoiceCommandIntent(getIntent());
     }
 
+    private VoiceInputCoordinator createVoiceInputCoordinator() {
+        return new VoiceInputCoordinator((runnable, delayMs) -> main.postDelayed(runnable, delayMs),
+                new VoiceInputCoordinator.Host() {
+                    @Override public boolean isTextModeActive() {
+                        return MainActivity.this.isTextModeActive();
+                    }
+
+                    @Override public boolean isInputActive() {
+                        return mic.running || inputAudioOpen;
+                    }
+
+                    @Override public boolean isRealtimeOpen() {
+                        return realtime.isOpen();
+                    }
+
+                    @Override public boolean isBoundHeadsetConnected() {
+                        return MainActivity.this.isBoundHeadsetConnected();
+                    }
+
+                    @Override public boolean hasRecordPermission() {
+                        return checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+                    }
+
+                    @Override public boolean hasActiveToolTtsPlayback() {
+                        return MainActivity.this.hasActiveToolTtsPlayback() ||
+                                (ttsPlayer != null && ttsPlayer.isPlaying());
+                    }
+
+                    @Override public boolean isReadyForContinuousListening() {
+                        return "ready".equals(state);
+                    }
+
+                    @Override public boolean isVoiceSurfaceActive() {
+                        return voiceLastTurnView != null;
+                    }
+
+                    @Override public void requestRecordPermission() {
+                        requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+                    }
+
+                    @Override public void connectRealtime() {
+                        realtime.connect();
+                    }
+
+                    @Override public void prepareInputStart(String interruptReason) {
+                        interruptRealtimePlayback(interruptReason);
+                    }
+
+                    @Override public void startInputAudio() {
+                        MainActivity.this.startInputAudio();
+                    }
+
+                    @Override public void stopInputAudio(String nextState) {
+                        MainActivity.this.stopInputAudio(nextState);
+                    }
+
+                    @Override public void setState(String nextState) {
+                        MainActivity.this.setState(nextState);
+                    }
+
+                    @Override public void showHeadsetPrompt() {
+                        MainActivity.this.showHeadsetPrompt(true);
+                    }
+
+                    @Override public void logVoiceInput(String message) {
+                        Log.d(TAG, "voice input " + message + " state=" + state);
+                    }
+                }, CONTINUOUS_CONVERSATION);
+    }
+
     private VoicePipelineManager createVoicePipelineManager() {
         return new VoicePipelineManager((runnable, delayMs) -> main.postDelayed(runnable, delayMs),
                 new VoicePipelineManager.Host() {
@@ -322,7 +391,7 @@ public class MainActivity extends Activity {
                     }
 
                     @Override public void prepareToolTtsPlayback() {
-                        pendingMicStart = false;
+                        clearVoiceInputRequests();
                         resetRealtimeOutput();
                         if (mic.running || inputAudioOpen) stopInputAudio("speaking");
                         if (realtime.isOpen()) interruptRealtimePlayback("tool_tts_playback", true);
@@ -607,17 +676,9 @@ public class MainActivity extends Activity {
 
     private void startVoiceFromAssistantCommand() {
         if (summaryInProgress || mic.running || inputAudioOpen) return;
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
-            return;
+        if (voiceInput != null) {
+            voiceInput.requestStart(true, "assistant_launch", true);
         }
-        if (!realtime.isOpen()) {
-            pendingVoiceWakeIntent = true;
-            realtime.connect();
-            return;
-        }
-        interruptRealtimePlayback("assistant_launch");
-        startInputAudio();
     }
 
     private void setupHeadsetMediaSession() {
@@ -717,8 +778,14 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
         super.onRequestPermissionsResult(requestCode, permissions, grants);
-        if (requestCode == REQ_AUDIO && grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) {
-            toggleMic();
+        if (requestCode == REQ_AUDIO) {
+            if (voiceInput != null) {
+                if (grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) {
+                    voiceInput.onRecordPermissionGranted();
+                } else {
+                    voiceInput.onRecordPermissionDenied();
+                }
+            }
         } else if (requestCode == REQ_LOCATION && grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED) {
             String question = pendingWeatherQuestion;
             boolean realtimeWeather = pendingWeatherRealtime;
@@ -735,7 +802,10 @@ public class MainActivity extends Activity {
             pendingWeatherRealtime = false;
             pendingWeatherToken = 0;
             if (question != null) {
-                weatherCallback(question, realtimeWeather, token).onError("没有定位权限，请告诉我城市名。");
+                if (weatherHandler != null) {
+                    weatherHandler.fail(question, "没有定位权限，请告诉我城市名。",
+                            result -> onWeatherToolResult(result, realtimeWeather, token));
+                }
             }
         }
     }
@@ -1189,7 +1259,7 @@ public class MainActivity extends Activity {
         realtimeRetryCount = 0;
         initUserTurns = 0;
         inputAudioOpen = false;
-        pendingMicStart = false;
+        clearVoiceInputRequests();
         pendingText = null;
         clearWeatherInteraction();
         latestWeatherFact = "";
@@ -1355,7 +1425,7 @@ public class MainActivity extends Activity {
     private void showChat() {
         clearVoiceWeatherCard(false);
         clearVoiceNewsCard(false);
-        if (mic.running || inputAudioOpen) stopInputAudio("ready");
+        enterTextMode();
         homeTimeView = null;
         voiceLastTurnView = null;
         voiceOrbView = null;
@@ -1378,6 +1448,19 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
+    private void enterTextMode() {
+        if (voiceInput != null) {
+            voiceInput.enterTextMode();
+            return;
+        }
+        if (mic.running || inputAudioOpen) stopInputAudio("text_only");
+        else setState("text_only");
+    }
+
+    private boolean isTextModeActive() {
+        return composer != null;
+    }
+
     private void openVoiceSurface() {
         if (initialized) {
             showVoiceHome();
@@ -1386,6 +1469,8 @@ public class MainActivity extends Activity {
         }
         if (!isBoundHeadsetConnected()) {
             main.postDelayed(() -> showHeadsetPrompt(true), 160);
+        } else if (initialized) {
+            main.postDelayed(() -> requestVoiceInputStart(true), 120);
         }
     }
 
@@ -1483,7 +1568,7 @@ public class MainActivity extends Activity {
         realtime.close();
         stopToolTtsPlayback(false);
         inputAudioOpen = false;
-        pendingMicStart = false;
+        clearVoiceInputRequests();
         pendingText = null;
         clearWeatherInteraction();
         latestWeatherFact = "";
@@ -1870,48 +1955,30 @@ public class MainActivity extends Activity {
     }
 
     private void runNewsTool(String question, boolean realtimeMode, int token) {
-        if (newsTool == null) return;
+        if (newsHandler == null) return;
         Log.d(TAG, "news tool fetch realtime=" + realtimeMode + " question=" + question);
-        newsTool.fetchDaily(newsCallback(question, realtimeMode, token));
+        newsHandler.fetch(question, result -> onNewsToolResult(result, realtimeMode, token));
     }
 
-    private NewsTool.CallbackResult newsCallback(String question, boolean realtimeMode, int token) {
-        return new NewsTool.CallbackResult() {
-            @Override public void onSuccess(NewsTool.NewsResult result) {
-                if (toolInteractions != null && !toolInteractions.completeNewsFetch(token)) return;
-                String fact = result.fact(question);
-                Log.d(TAG, "news tool success items=" + result.items.size() + " realtime=" + realtimeMode);
-                latestNewsFact = fact;
-                if (realtimeMode) {
-                    addNewsCard(result);
-                    String answer = result.shortAnswer();
-                    addChatMessage("assistant", answer);
-                    renderMessages();
-                    queueToolTtsPlayback("news", answer);
-                } else {
-                    addNewsCard(result);
-                    addChatMessage("assistant", result.shortAnswer());
-                    renderMessages();
-                    setState("ready");
-                }
-            }
-
-            @Override public void onError(String message) {
-                if (toolInteractions != null && !toolInteractions.completeNewsFetch(token)) return;
-                Log.d(TAG, "news tool error realtime=" + realtimeMode + " message=" + message);
-                if (realtimeMode) {
-                    latestNewsFact = NewsSkill.failureFact(message);
-                    String answer = "暂时没读到新闻热点，" + message + "。你可以稍后再试一下。";
-                    addChatMessage("assistant", answer);
-                    renderMessages();
-                    queueToolTtsPlayback("news", answer);
-                } else {
-                    addChatMessage("assistant", message);
-                    renderMessages();
-                    setState("ready");
-                }
-            }
-        };
+    private void onNewsToolResult(ToolInteractionResult<NewsTool.NewsResult> result,
+            boolean realtimeMode, int token) {
+        if (toolInteractions != null && !toolInteractions.completeNewsFetch(token)) return;
+        if (result.success || realtimeMode) latestNewsFact = result.fact;
+        if (result.success) {
+            Log.d(TAG, "news tool success items=" + result.payload.items.size() + " realtime=" + realtimeMode);
+            addNewsCard(result.payload);
+        } else {
+            Log.d(TAG, "news tool error realtime=" + realtimeMode + " message=" + result.errorMessage);
+        }
+        if (realtimeMode) {
+            addChatMessage("assistant", result.answer);
+            renderMessages();
+            queueToolTtsPlayback("news", result.answer);
+        } else {
+            addChatMessage("assistant", result.success ? result.answer : result.errorMessage);
+            renderMessages();
+            setState("ready");
+        }
     }
 
     private boolean handleWeatherQuestion(String text, boolean realtimeMode) {
@@ -1973,59 +2040,50 @@ public class MainActivity extends Activity {
     }
 
     private void failWeatherIntent(String question, boolean realtimeMode, int token) {
-        weatherCallback(question, realtimeMode, token).onError("天气意图解析失败，请再说一次城市名。");
+        if (weatherHandler == null) return;
+        weatherHandler.fail(question, "天气意图解析失败，请再说一次城市名。",
+                result -> onWeatherToolResult(result, realtimeMode, token));
     }
 
     private void runWeatherTool(String question, String city, boolean realtimeMode, int token) {
-        if (weatherTool == null) {
-            weatherCallback(question, realtimeMode, token).onError("天气工具不可用");
+        if (weatherHandler == null) {
+            onWeatherToolResult(ToolInteractionResult.failure(
+                    "weather",
+                    question,
+                    WeatherSkill.failureFact("天气工具不可用"),
+                    "暂时没查到天气，天气工具不可用。你可以稍后再试，或者告诉我具体城市。",
+                    "天气工具不可用"), realtimeMode, token);
             return;
         }
         if (city != null && !city.trim().isEmpty()) {
             Log.d(TAG, "weather query city=" + city.trim() + " realtime=" + realtimeMode);
-            weatherTool.queryCity(city.trim(), weatherCallback(question, realtimeMode, token));
+            weatherHandler.queryCity(question, city.trim(),
+                    result -> onWeatherToolResult(result, realtimeMode, token));
             return;
         }
         Log.d(TAG, "weather query current location realtime=" + realtimeMode);
         requestWeatherForCurrentLocation(question, realtimeMode, token);
     }
 
-    private WeatherTool.CallbackResult weatherCallback(String question, boolean realtimeMode, int token) {
-        return new WeatherTool.CallbackResult() {
-            @Override public void onSuccess(WeatherTool.WeatherResult result) {
-                if (toolInteractions != null && !toolInteractions.completeWeatherFetch(token)) return;
-                String fact = result.fact(question);
-                Log.d(TAG, "weather success place=" + result.placeName + " realtime=" + realtimeMode);
-                latestWeatherFact = fact;
-                addWeatherCard(result);
-                if (realtimeMode) {
-                    String answer = result.shortAnswer();
-                    addChatMessage("assistant", answer);
-                    renderMessages();
-                    queueToolTtsPlayback("weather", answer);
-                } else {
-                    addChatMessage("assistant", result.shortAnswer());
-                    renderMessages();
-                    setState("ready");
-                }
-            }
-
-            @Override public void onError(String message) {
-                if (toolInteractions != null && !toolInteractions.completeWeatherFetch(token)) return;
-                Log.d(TAG, "weather error realtime=" + realtimeMode + " message=" + message);
-                if (realtimeMode) {
-                    latestWeatherFact = WeatherSkill.failureFact(message);
-                    String answer = "暂时没查到天气，" + message + "。你可以稍后再试，或者告诉我具体城市。";
-                    addChatMessage("assistant", answer);
-                    renderMessages();
-                    queueToolTtsPlayback("weather", answer);
-                } else {
-                    addChatMessage("assistant", message);
-                    renderMessages();
-                    setState("ready");
-                }
-            }
-        };
+    private void onWeatherToolResult(ToolInteractionResult<WeatherTool.WeatherResult> result,
+            boolean realtimeMode, int token) {
+        if (toolInteractions != null && !toolInteractions.completeWeatherFetch(token)) return;
+        if (result.success || realtimeMode) latestWeatherFact = result.fact;
+        if (result.success) {
+            Log.d(TAG, "weather success place=" + result.payload.placeName + " realtime=" + realtimeMode);
+            addWeatherCard(result.payload);
+        } else {
+            Log.d(TAG, "weather error realtime=" + realtimeMode + " message=" + result.errorMessage);
+        }
+        if (realtimeMode) {
+            addChatMessage("assistant", result.answer);
+            renderMessages();
+            queueToolTtsPlayback("weather", result.answer);
+        } else {
+            addChatMessage("assistant", result.success ? result.answer : result.errorMessage);
+            renderMessages();
+            setState("ready");
+        }
     }
 
     private void requestWeatherForCurrentLocation(String question, boolean realtimeMode, int token) {
@@ -2042,20 +2100,29 @@ public class MainActivity extends Activity {
         }
         LocationManager manager = (LocationManager) getSystemService(LOCATION_SERVICE);
         if (manager == null) {
-            weatherCallback(question, realtimeMode, token).onError("无法读取当前位置");
+            if (weatherHandler != null) {
+                weatherHandler.fail(question, "无法读取当前位置",
+                        result -> onWeatherToolResult(result, realtimeMode, token));
+            }
             return;
         }
         try {
             Location last = WeatherSkill.bestLastLocation(manager);
             if (last != null) {
-                weatherTool.queryLocation(last, weatherCallback(question, realtimeMode, token));
+                weatherHandler.queryLocation(question, last,
+                        result -> onWeatherToolResult(result, realtimeMode, token));
                 return;
             }
             WeatherSkill.requestSingleLocation(manager, main,
-                    location -> weatherTool.queryLocation(location, weatherCallback(question, realtimeMode, token)),
-                    message -> weatherCallback(question, realtimeMode, token).onError(message));
+                    location -> weatherHandler.queryLocation(question, location,
+                            result -> onWeatherToolResult(result, realtimeMode, token)),
+                    message -> weatherHandler.fail(question, message,
+                            result -> onWeatherToolResult(result, realtimeMode, token)));
         } catch (SecurityException error) {
-            weatherCallback(question, realtimeMode, token).onError("没有定位权限");
+            if (weatherHandler != null) {
+                weatherHandler.fail(question, "没有定位权限",
+                        result -> onWeatherToolResult(result, realtimeMode, token));
+            }
         }
     }
 
@@ -2188,30 +2255,18 @@ public class MainActivity extends Activity {
         return voicePipeline != null && voicePipeline.onRealtimeStoppedBeforeToolTts();
     }
 
+    private void clearVoiceInputRequests() {
+        if (voiceInput == null) return;
+        voiceInput.clearPendingStart();
+        voiceInput.cancelContinuousListening();
+    }
+
     private void resumeListeningAfterToolTts(long delayMs) {
-        if (!CONTINUOUS_CONVERSATION) return;
-        main.postDelayed(() -> {
-            if (voiceLastTurnView == null) return;
-            if (mic.running || inputAudioOpen) return;
-            requestVoiceInputStart(false);
-        }, delayMs);
+        if (voiceInput != null) voiceInput.resumeAfterToolTts(delayMs);
     }
 
     private void requestVoiceInputStart(boolean requestPermission) {
-        if (mic.running || inputAudioOpen) return;
-        if (!isBoundHeadsetConnected()) return;
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            pendingMicStart = true;
-            if (requestPermission) requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
-            return;
-        }
-        pendingMicStart = true;
-        if (realtime.isOpen()) {
-            pendingMicStart = false;
-            startInputAudio();
-        } else {
-            realtime.connect();
-        }
+        if (voiceInput != null) voiceInput.requestStart(requestPermission, null, false);
     }
 
     private void stopToolTtsPlayback(boolean resumeListening) {
@@ -2327,6 +2382,7 @@ public class MainActivity extends Activity {
     }
 
     private void toggleMic() {
+        if (isTextModeActive()) return;
         if (summaryInProgress) return;
         markConversationInteraction(false);
         if (hasActiveToolTtsPlayback() || (ttsPlayer != null && ttsPlayer.isPlaying())) {
@@ -2346,21 +2402,7 @@ public class MainActivity extends Activity {
             stopInputAudio("processing");
             return;
         }
-        if (!isBoundHeadsetConnected()) {
-            showHeadsetPrompt(true);
-            return;
-        }
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
-            return;
-        }
-        if (!realtime.isOpen()) {
-            pendingMicStart = true;
-            realtime.connect();
-            return;
-        }
-        interruptRealtimePlayback("user_speech_detected");
-        startInputAudio();
+        if (voiceInput != null) voiceInput.requestStart(true, "user_speech_detected", true);
     }
 
     private void interruptNewsPlayback() {
@@ -2401,6 +2443,9 @@ public class MainActivity extends Activity {
     }
 
     private void startInputAudio() {
+        if (isTextModeActive()) {
+            return;
+        }
         if (mic.running || inputAudioOpen) return;
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
         cancelScheduledContinuousListening();
@@ -2524,28 +2569,15 @@ public class MainActivity extends Activity {
     }
 
     private void startContinuousListening() {
-        if (!CONTINUOUS_CONVERSATION) return;
-        if (hasActiveToolTtsPlayback()) return;
-        if (mic.running || inputAudioOpen || !realtime.isOpen()) return;
-        if (!isBoundHeadsetConnected()) return;
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
-        startInputAudio();
+        if (voiceInput != null) voiceInput.startContinuousListening();
     }
 
     private void scheduleContinuousListening(long delayMs) {
-        if (!CONTINUOUS_CONVERSATION) return;
-        int seq = ++continuousListeningSeq;
-        main.postDelayed(() -> {
-            if (seq != continuousListeningSeq) return;
-            if (hasActiveToolTtsPlayback()) return;
-            if ("ready".equals(state) && !mic.running && !inputAudioOpen) {
-                startContinuousListening();
-            }
-        }, delayMs);
+        if (voiceInput != null) voiceInput.scheduleContinuousListening(delayMs);
     }
 
     private void cancelScheduledContinuousListening() {
-        continuousListeningSeq++;
+        if (voiceInput != null) voiceInput.cancelContinuousListening();
     }
 
     private void onRealtimeReady() {
@@ -2553,21 +2585,11 @@ public class MainActivity extends Activity {
             setState("speaking");
             return;
         }
-        if (pendingVoiceWakeIntent) {
-            pendingVoiceWakeIntent = false;
-            if (isBoundHeadsetConnected()) {
-                toggleMic();
-                return;
-            }
-        }
         if (initPromptPending) {
             initPromptPending = false;
             updateInitializationContext();
             setState("ready");
-            if (pendingMicStart) {
-                pendingMicStart = false;
-                startInputAudio();
-            }
+            if (voiceInput != null) voiceInput.onRealtimeReady();
             return;
         }
         if (hasPendingWeatherBroadcast()) {
@@ -2583,10 +2605,7 @@ public class MainActivity extends Activity {
             realtime.sendInputText(text);
             setState("processing");
         }
-        if (pendingMicStart) {
-            pendingMicStart = false;
-            toggleMic();
-        }
+        if (voiceInput != null) voiceInput.onRealtimeReady();
     }
 
     private void onAssistantDelta(String text) {
@@ -3178,19 +3197,18 @@ public class MainActivity extends Activity {
                 initGuide;
         }
         String recent = recentDialogueForPrompt();
-        return trimForPrompt("你叫 " + effectiveAgentName() + "。\n" +
-                INSTRUCTIONS + "\n" +
+        return PromptMemoryComposer.compose(
+                effectiveAgentName(),
+                userName,
+                userMemory,
+                agentMemory,
+                dynamicTone,
+                conversationMemory,
+                recent,
                 WeatherSkill.promptBlock(latestWeatherFact, isAwaitingRealtimeWeatherAnswer()) +
-                NewsSkill.promptBlock(latestNewsFact, isAwaitingRealtimeNewsAnswer()) +
-                "当前动态语气调整：" + dynamicTone + "\n" +
-                "以下是本地 user.md 记忆。你需要把它作为长期用户画像和对话偏好使用，但不要主动朗读或暴露文件内容。\n\n" +
-                userMemory + "\n\n" +
-                "以下是本地 Agent.md。你需要把它作为自己的关系定位、语气和长期行为准则使用。\n\n" +
-                agentMemory + "\n\n" +
-                "姓名和关系设定规则：如果 user.md 或 Agent.md 已记录用户姓名/称呼或用户希望与你建立的关系，你必须优先承认并沿用这些设定；不要说用户没告诉过名字，也不要把已设定的女朋友/恋人关系改写成普通朋友。\n\n" +
-                "以下是 SQLite 长期聊天记忆和索引检索出的相关摘要。把它用于延续关系、调整称呼、话题和语气，但不要主动说明你在读取记忆。\n\n" +
-                conversationMemory + "\n\n" +
-                "最近会话片段：\n" + recent, 3900);
+                        NewsSkill.promptBlock(latestNewsFact, isAwaitingRealtimeNewsAnswer()),
+                INSTRUCTIONS,
+                3900);
     }
 
     private String recentDialogueForPrompt() {
@@ -3406,8 +3424,7 @@ public class MainActivity extends Activity {
         Log.d(TAG, "init realtime degraded: " + reason);
         mic.stop();
         inputAudioOpen = false;
-        pendingMicStart = false;
-        pendingVoiceWakeIntent = false;
+        clearVoiceInputRequests();
         initPromptPending = false;
         realtimeRetryCount = 0;
         player.stop();
