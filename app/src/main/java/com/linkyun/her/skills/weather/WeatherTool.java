@@ -137,13 +137,13 @@ final class WeatherTool {
 
         WeatherResult(String placeName, double temperatureC, double apparentTemperatureC,
                 int humidity, double windKmh, String condition, String observedAt) {
-            this.placeName = placeName;
+            this.placeName = cleanText(placeName);
             this.temperatureC = temperatureC;
             this.apparentTemperatureC = apparentTemperatureC;
             this.humidity = humidity;
             this.windKmh = windKmh;
-            this.condition = condition;
-            this.observedAt = observedAt;
+            this.condition = cleanText(condition);
+            this.observedAt = cleanText(observedAt);
         }
 
         String fact(String userQuestion) {
@@ -184,6 +184,13 @@ final class WeatherTool {
 
         String windText() {
             return oneDecimal(windKmh) + " km/h";
+        }
+
+        private static String cleanText(String value) {
+            if (value == null) return "";
+            return value.replace('\u00A0', ' ')
+                    .replaceAll("\\s+", " ")
+                    .trim();
         }
     }
 }

@@ -38,6 +38,22 @@ public final class RealtimeOutputCoordinatorTest {
     }
 
     @Test
+    public void startOutsideVoiceSurfaceInterruptsAndDiscardsUntilDone() {
+        FakeHost host = new FakeHost();
+        host.voiceSurfaceActive = false;
+        RealtimeOutputCoordinator coordinator = new RealtimeOutputCoordinator(host);
+
+        coordinator.onStarted(24000, false);
+
+        assertEquals(VoicePipelineState.RealtimeOutput.DISCARDING_UNTIL_DONE, coordinator.state());
+        assertTrue(coordinator.shouldDiscardAudio());
+        assertEquals(1, host.interruptCount);
+        assertEquals("voice_surface_inactive", host.lastInterruptReason);
+        assertTrue(host.lastInterruptDiscard);
+        assertEquals(0, host.enterSpeakingCount);
+    }
+
+    @Test
     public void doneClearsStreamingState() {
         FakeHost host = new FakeHost();
         RealtimeOutputCoordinator coordinator = new RealtimeOutputCoordinator(host);
@@ -75,6 +91,7 @@ public final class RealtimeOutputCoordinatorTest {
     }
 
     private static final class FakeHost implements RealtimeOutputCoordinator.Host {
+        boolean voiceSurfaceActive = true;
         boolean externalTtsPlaying;
         int enterSpeakingCount;
         int lastSampleRate;
@@ -82,6 +99,10 @@ public final class RealtimeOutputCoordinatorTest {
         String lastInterruptReason;
         boolean lastInterruptDiscard;
         int stopCount;
+
+        @Override public boolean isVoiceSurfaceActive() {
+            return voiceSurfaceActive;
+        }
 
         @Override public boolean isExternalTtsPlaying() {
             return externalTtsPlaying;

@@ -10,7 +10,8 @@ final class ToolInteractionCoordinator {
 
     interface Host {
         void onNewsStarted(String question, boolean realtimeMode);
-        void startNewsAck(String question);
+        void invalidateBackgroundToolRoute();
+        boolean startNewsAck(String question);
         void startNewsFetch(String question, boolean realtimeMode, int token);
         void onNewsCompleted(String question, boolean realtimeMode);
         void onNewsInterrupted(String question, boolean realtimeMode);
@@ -23,9 +24,9 @@ final class ToolInteractionCoordinator {
 
     private final Host host;
     private State state = State.IDLE;
-    private String activeQuestion;
-    private boolean activeRealtimeMode;
+    private ToolSession activeSession = ToolSession.none();
     private int token;
+    private boolean newsAckSent;
 
     ToolInteractionCoordinator(Host host) {
         this.host = host;
@@ -40,7 +41,7 @@ final class ToolInteractionCoordinator {
     }
 
     boolean isAwaitingRealtimeNewsAnswer() {
-        return activeRealtimeMode && isNewsActive();
+        return isNewsActive() && activeSession.isRealtimeTool(NewsToolDefinition.ID);
     }
 
     boolean isNewsAckPending() {
@@ -52,19 +53,21 @@ final class ToolInteractionCoordinator {
     }
 
     boolean isAwaitingRealtimeWeatherAnswer() {
-        return activeRealtimeMode && isWeatherActive();
+        return isWeatherActive() && activeSession.isRealtimeTool(WeatherToolDefinition.ID);
     }
 
     void startNews(String question, boolean realtimeMode) {
         String normalizedQuestion = normalizeQuestion(question, "每日新闻热点");
+        interruptActiveSessionForReplacement();
         token++;
-        activeQuestion = normalizedQuestion;
-        activeRealtimeMode = realtimeMode;
+        activeSession = ToolSession.start(NewsToolDefinition.ID, normalizedQuestion, realtimeMode, token);
+        newsAckSent = false;
+        host.invalidateBackgroundToolRoute();
         if (realtimeMode) {
             state = State.NEWS_ACKING;
             host.onNewsStarted(normalizedQuestion, true);
             host.logToolInteraction("news ack start question=" + normalizedQuestion);
-            host.startNewsAck(normalizedQuestion);
+            newsAckSent = host.startNewsAck(normalizedQuestion);
         } else {
             state = State.NEWS_FETCHING;
             host.onNewsStarted(normalizedQuestion, false);
@@ -75,9 +78,10 @@ final class ToolInteractionCoordinator {
 
     void startNewsFromBackground(String question) {
         String normalizedQuestion = normalizeQuestion(question, "每日新闻热点");
+        interruptActiveSessionForReplacement();
         token++;
-        activeQuestion = normalizedQuestion;
-        activeRealtimeMode = true;
+        activeSession = ToolSession.start(NewsToolDefinition.ID, normalizedQuestion, true, token);
+        newsAckSent = false;
         state = State.NEWS_FETCHING;
         host.onNewsStarted(normalizedQuestion, true);
         host.logToolInteraction("news background fetch start question=" + normalizedQuestion);
@@ -86,9 +90,11 @@ final class ToolInteractionCoordinator {
 
     void startWeather(String question, boolean realtimeMode) {
         String normalizedQuestion = normalizeQuestion(question, "天气");
+        interruptActiveSessionForReplacement();
         token++;
-        activeQuestion = normalizedQuestion;
-        activeRealtimeMode = realtimeMode;
+        activeSession = ToolSession.start(WeatherToolDefinition.ID, normalizedQuestion, realtimeMode, token);
+        newsAckSent = false;
+        host.invalidateBackgroundToolRoute();
         state = State.WEATHER_FETCHING;
         host.onWeatherStarted(normalizedQuestion, realtimeMode);
         host.logToolInteraction("weather fetch start question=" + normalizedQuestion);
@@ -97,31 +103,36 @@ final class ToolInteractionCoordinator {
 
     boolean onRealtimeReady() {
         if (state != State.NEWS_ACKING) return false;
-        host.startNewsAck(activeQuestion);
+        if (!newsAckSent) {
+            newsAckSent = host.startNewsAck(activeSession.question());
+        }
         return true;
     }
 
     boolean onRealtimeOutputFinished() {
         if (state != State.NEWS_ACKING) return false;
+        if (!newsAckSent) return false;
         state = State.NEWS_FETCHING;
-        host.logToolInteraction("news ack done, fetch question=" + activeQuestion);
-        host.startNewsFetch(activeQuestion, true, token);
+        host.logToolInteraction("news ack done, fetch question=" + activeSession.question());
+        host.startNewsFetch(activeSession.question(), true, activeSession.token());
         return true;
     }
 
     boolean completeNewsFetch(int callbackToken) {
-        if (callbackToken != token || state != State.NEWS_FETCHING) return false;
-        String question = activeQuestion;
-        boolean realtimeMode = activeRealtimeMode;
+        if (state != State.NEWS_FETCHING ||
+                !activeSession.matches(NewsToolDefinition.ID, callbackToken)) return false;
+        String question = activeSession.question();
+        boolean realtimeMode = activeSession.realtimeMode();
         clear();
         host.onNewsCompleted(question, realtimeMode);
         return true;
     }
 
     boolean completeWeatherFetch(int callbackToken) {
-        if (callbackToken != token || state != State.WEATHER_FETCHING) return false;
-        String question = activeQuestion;
-        boolean realtimeMode = activeRealtimeMode;
+        if (state != State.WEATHER_FETCHING ||
+                !activeSession.matches(WeatherToolDefinition.ID, callbackToken)) return false;
+        String question = activeSession.question();
+        boolean realtimeMode = activeSession.realtimeMode();
         clear();
         host.onWeatherCompleted(question, realtimeMode);
         return true;
@@ -132,8 +143,8 @@ final class ToolInteractionCoordinator {
             token++;
             return;
         }
-        String question = activeQuestion;
-        boolean realtimeMode = activeRealtimeMode;
+        String question = activeSession.question();
+        boolean realtimeMode = activeSession.realtimeMode();
         token++;
         clear();
         host.onNewsInterrupted(question, realtimeMode);
@@ -144,8 +155,8 @@ final class ToolInteractionCoordinator {
             token++;
             return;
         }
-        String question = activeQuestion;
-        boolean realtimeMode = activeRealtimeMode;
+        String question = activeSession.question();
+        boolean realtimeMode = activeSession.realtimeMode();
         token++;
         clear();
         host.onWeatherInterrupted(question, realtimeMode);
@@ -167,8 +178,21 @@ final class ToolInteractionCoordinator {
 
     private void clear() {
         state = State.IDLE;
-        activeQuestion = null;
-        activeRealtimeMode = false;
+        activeSession = ToolSession.none();
+        newsAckSent = false;
+    }
+
+    private void interruptActiveSessionForReplacement() {
+        if (!isNewsActive() && !isWeatherActive()) return;
+        String toolId = activeSession.toolId();
+        String question = activeSession.question();
+        boolean realtimeMode = activeSession.realtimeMode();
+        clear();
+        if (NewsToolDefinition.ID.equals(toolId)) {
+            host.onNewsInterrupted(question, realtimeMode);
+        } else if (WeatherToolDefinition.ID.equals(toolId)) {
+            host.onWeatherInterrupted(question, realtimeMode);
+        }
     }
 
     private static String normalizeQuestion(String question, String fallback) {

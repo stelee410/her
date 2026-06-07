@@ -58,9 +58,51 @@ public final class VoiceInputCoordinatorTest {
     }
 
     @Test
+    public void requestStartRequiresVoiceSurface() {
+        Host host = new Host();
+        host.voiceSurface = false;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.requestStart(true, "manual", true);
+
+        assertFalse(coordinator.hasPendingStart());
+        assertEquals(0, host.startCount);
+        assertEquals(0, host.events.size());
+    }
+
+    @Test
+    public void realtimeReadyAfterLeavingVoiceSurfaceDoesNotStartInput() {
+        Host host = new Host();
+        host.realtimeOpen = false;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.requestStart(true, "manual", true);
+        assertTrue(coordinator.hasPendingStart());
+
+        host.voiceSurface = false;
+        host.realtimeOpen = true;
+        assertTrue(coordinator.onRealtimeReady());
+
+        assertFalse(coordinator.hasPendingStart());
+        assertEquals(0, host.startCount);
+    }
+
+    @Test
     public void scheduledContinuousListeningDoesNotStartInTextMode() {
         Host host = new Host();
         host.textMode = true;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.scheduleContinuousListening(100);
+        host.runScheduled();
+
+        assertEquals(0, host.startCount);
+    }
+
+    @Test
+    public void scheduledContinuousListeningDoesNotStartOffVoiceSurface() {
+        Host host = new Host();
+        host.voiceSurface = false;
         VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
 
         coordinator.scheduleContinuousListening(100);
@@ -78,6 +120,17 @@ public final class VoiceInputCoordinatorTest {
         host.runScheduled();
 
         assertEquals(1, host.startCount);
+    }
+
+    @Test
+    public void directContinuousListeningRequiresVoiceSurface() {
+        Host host = new Host();
+        host.voiceSurface = false;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.startContinuousListening();
+
+        assertEquals(0, host.startCount);
     }
 
     @Test
@@ -124,6 +177,38 @@ public final class VoiceInputCoordinatorTest {
     }
 
     @Test
+    public void realtimeReadyBeforePermissionGrantKeepsPendingStart() {
+        Host host = new Host();
+        host.permission = false;
+        host.realtimeOpen = true;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.requestStart(true, "manual", true);
+        assertTrue(coordinator.hasPendingStart());
+
+        assertTrue(coordinator.onRealtimeReady());
+
+        assertTrue(coordinator.hasPendingStart());
+        assertEquals(0, host.startCount);
+    }
+
+    @Test
+    public void permissionGrantedCallbackWithoutActualPermissionClearsPendingStart() {
+        Host host = new Host();
+        host.permission = false;
+        host.realtimeOpen = true;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.requestStart(true, "manual", true);
+        assertTrue(coordinator.hasPendingStart());
+
+        coordinator.onRecordPermissionGranted();
+
+        assertFalse(coordinator.hasPendingStart());
+        assertEquals(0, host.startCount);
+    }
+
+    @Test
     public void headsetPromptIsOnlyShownForPromptedStarts() {
         Host host = new Host();
         host.bound = false;
@@ -135,6 +220,30 @@ public final class VoiceInputCoordinatorTest {
         coordinator.requestStart(true, "manual", true);
         assertEquals("headset", host.events.get(0));
         assertFalse(coordinator.hasPendingStart());
+    }
+
+    @Test
+    public void resumeAfterToolTtsDoesNotStartWhileAnotherToolTtsIsActive() {
+        Host host = new Host();
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.resumeAfterToolTts(350);
+        host.toolTts = true;
+        host.runScheduled();
+
+        assertEquals(0, host.startCount);
+        assertFalse(coordinator.hasPendingStart());
+    }
+
+    @Test
+    public void resumeAfterToolTtsStartsWhenVoiceSurfaceIsReady() {
+        Host host = new Host();
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.resumeAfterToolTts(350);
+        host.runScheduled();
+
+        assertEquals(1, host.startCount);
     }
 
     private static final class Host implements VoiceInputCoordinator.Scheduler, VoiceInputCoordinator.Host {

@@ -55,6 +55,34 @@ public final class ToolTtsCoordinatorTest {
     }
 
     @Test
+    public void queueIsIgnoredInTextMode() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.textMode = true;
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "不该播。");
+
+        assertFalse(coordinator.hasPendingPlayback());
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(0, host.playCount);
+    }
+
+    @Test
+    public void queueIsIgnoredOutsideVoiceSurface() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.voiceSurfaceActive = false;
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "不该播。");
+
+        assertFalse(coordinator.hasPendingPlayback());
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(0, host.playCount);
+    }
+
+    @Test
     public void queueForceStartsIfRealtimeStopCallbackIsMissing() {
         ManualScheduler scheduler = new ManualScheduler();
         FakeHost host = new FakeHost();
@@ -68,6 +96,59 @@ public final class ToolTtsCoordinatorTest {
         assertEquals(1, host.prepareCount);
         assertEquals(1, host.playCount);
         assertEquals(VoicePipelineState.ToolTts.REQUESTING, coordinator.state());
+    }
+
+    @Test
+    public void forceStartClearsPendingWhenTextModeBecameActive() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.realtimePlaybackActive = true;
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "旧播报。");
+        host.textMode = true;
+        scheduler.runDelay(220);
+
+        assertFalse(coordinator.hasPendingPlayback());
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(0, host.playCount);
+        assertEquals(1, host.finishCount);
+    }
+
+    @Test
+    public void forceStartClearsPendingWhenVoiceSurfaceBecameInactive() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.realtimePlaybackActive = true;
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "旧播报。");
+        host.voiceSurfaceActive = false;
+        scheduler.runDelay(220);
+
+        assertFalse(coordinator.hasPendingPlayback());
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(0, host.playCount);
+        assertEquals(1, host.finishCount);
+    }
+
+    @Test
+    public void staleForceStartDoesNotStartReplacementPendingPlayback() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.realtimePlaybackActive = true;
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "旧播报。");
+        Runnable staleForceStart = scheduler.tasks.get(0).runnable;
+        coordinator.stop(false);
+        coordinator.queue("news", "新播报。");
+
+        staleForceStart.run();
+
+        assertEquals(0, host.playCount);
+        assertTrue(coordinator.hasPendingPlayback());
+        assertEquals(VoicePipelineState.ToolTts.WAITING_REALTIME_STOP, coordinator.state());
     }
 
     @Test
@@ -89,6 +170,63 @@ public final class ToolTtsCoordinatorTest {
     }
 
     @Test
+    public void deferredStartClearsPendingWhenTextModeBecameActive() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.deferStart = true;
+        host.speakingState = true;
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("news", "延迟播放。");
+        host.speakingState = false;
+        host.textMode = true;
+        scheduler.runDelay(3200);
+
+        assertFalse(coordinator.hasPendingPlayback());
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(0, host.playCount);
+        assertEquals(1, host.finishCount);
+    }
+
+    @Test
+    public void deferredStartClearsPendingWhenVoiceSurfaceBecameInactive() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.deferStart = true;
+        host.speakingState = true;
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("news", "延迟播放。");
+        host.speakingState = false;
+        host.voiceSurfaceActive = false;
+        scheduler.runDelay(3200);
+
+        assertFalse(coordinator.hasPendingPlayback());
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(0, host.playCount);
+        assertEquals(1, host.finishCount);
+    }
+
+    @Test
+    public void staleDeferredStartDoesNotStartReplacementPendingPlayback() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.deferStart = true;
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "旧延迟。");
+        Runnable staleDeferredStart = scheduler.tasks.get(0).runnable;
+        coordinator.stop(false);
+        coordinator.queue("news", "新延迟。");
+
+        staleDeferredStart.run();
+
+        assertEquals(0, host.playCount);
+        assertTrue(coordinator.hasPendingPlayback());
+        assertEquals(VoicePipelineState.ToolTts.QUEUED, coordinator.state());
+    }
+
+    @Test
     public void stopClearsPendingAndCanResumeListening() {
         ManualScheduler scheduler = new ManualScheduler();
         FakeHost host = new FakeHost();
@@ -102,6 +240,114 @@ public final class ToolTtsCoordinatorTest {
         assertFalse(coordinator.isPlaybackActive());
         assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
         assertEquals(80L, host.lastResumeDelay);
+    }
+
+    @Test
+    public void stopOutsideVoiceSurfaceDoesNotResumeListening() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.realtimePlaybackActive = true;
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("news", "取消这段。");
+        host.voiceSurfaceActive = false;
+        coordinator.stop(true);
+
+        assertFalse(coordinator.hasPendingPlayback());
+        assertFalse(coordinator.isPlaybackActive());
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(-1, host.lastResumeDelay);
+    }
+
+    @Test
+    public void staleCompletionAfterStopDoesNotResumeListeningAgain() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "先播报。");
+        ToolTtsCoordinator.PlaybackListener oldListener = host.listener;
+        String oldId = host.playedId;
+        oldListener.onStarted(oldId, host.playedText);
+        coordinator.stop(false);
+
+        oldListener.onCompleted(oldId);
+
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(1, host.finishCount);
+        assertEquals(-1, host.lastResumeDelay);
+    }
+
+    @Test
+    public void staleCompletionFromPreviousPlaybackDoesNotFinishNewPlayback() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "第一段。");
+        ToolTtsCoordinator.PlaybackListener oldListener = host.listener;
+        String oldId = host.playedId;
+        coordinator.queue("news", "第二段。");
+        ToolTtsCoordinator.PlaybackListener newListener = host.listener;
+        String newId = host.playedId;
+
+        oldListener.onCompleted(oldId);
+
+        assertEquals(VoicePipelineState.ToolTts.REQUESTING, coordinator.state());
+        assertEquals(0, host.finishCount);
+
+        newListener.onCompleted(newId);
+
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(1, host.finishCount);
+        assertEquals(350L, host.lastResumeDelay);
+    }
+
+    @Test
+    public void completionInTextModeDoesNotResumeListening() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "先播报。");
+        host.listener.onStarted(host.playedId, host.playedText);
+        host.textMode = true;
+        host.listener.onCompleted(host.playedId);
+
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(1, host.finishCount);
+        assertEquals(-1, host.lastResumeDelay);
+    }
+
+    @Test
+    public void completionOutsideVoiceSurfaceDoesNotResumeListening() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "先播报。");
+        host.listener.onStarted(host.playedId, host.playedText);
+        host.voiceSurfaceActive = false;
+        host.listener.onCompleted(host.playedId);
+
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(1, host.finishCount);
+        assertEquals(-1, host.lastResumeDelay);
+    }
+
+    @Test
+    public void startedCallbackOutsideVoiceSurfaceFinishesWithoutPlayingState() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        ToolTtsCoordinator coordinator = new ToolTtsCoordinator(scheduler, host);
+
+        coordinator.queue("weather", "先播报。");
+        host.voiceSurfaceActive = false;
+        host.listener.onStarted(host.playedId, host.playedText);
+
+        assertEquals(VoicePipelineState.ToolTts.IDLE, coordinator.state());
+        assertEquals(1, host.finishCount);
+        assertEquals(-1, host.lastResumeDelay);
     }
 
     private static final class ManualScheduler implements ToolTtsCoordinator.Scheduler {
@@ -134,6 +380,8 @@ public final class ToolTtsCoordinatorTest {
     }
 
     private static final class FakeHost implements ToolTtsCoordinator.Host {
+        boolean textMode;
+        boolean voiceSurfaceActive = true;
         boolean realtimePlaybackActive;
         boolean deferStart;
         boolean speakingState;
@@ -145,6 +393,14 @@ public final class ToolTtsCoordinatorTest {
         String playedId;
         String playedText;
         ToolTtsCoordinator.PlaybackListener listener;
+
+        @Override public boolean isTextModeActive() {
+            return textMode;
+        }
+
+        @Override public boolean isVoiceSurfaceActive() {
+            return voiceSurfaceActive;
+        }
 
         @Override public boolean isRealtimePlaybackActive() {
             return realtimePlaybackActive;

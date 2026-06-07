@@ -157,11 +157,19 @@ final class WeatherSkill {
     }
 
     static String failureFact(String message) {
-        return "【天气查询结果】查询失败：" + message + "。请向用户说明暂时没查到，并请用户稍后重试或指定城市。";
+        return "【天气查询结果】查询失败：" + failureMessage(message) + "。请向用户说明暂时没查到，并请用户稍后重试或指定城市。";
     }
 
     static boolean isTransientMemory(String text) {
         return text != null && (text.contains("【天气查询结果】") || text.contains("【系统事件】天气查询"));
+    }
+
+    static String failureMessage(String message) {
+        if (message == null) return "工具异常";
+        String clean = message.replace('\u00A0', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+        return clean.isEmpty() ? "工具异常" : clean;
     }
 
     static Location bestLastLocation(LocationManager manager) {
@@ -181,8 +189,10 @@ final class WeatherSkill {
         String provider = manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
                 ? LocationManager.NETWORK_PROVIDER
                 : LocationManager.GPS_PROVIDER;
+        OneShotCallbackGuard guard = new OneShotCallbackGuard();
         LocationListener listener = new LocationListener() {
             @Override public void onLocationChanged(Location location) {
+                if (!guard.tryComplete()) return;
                 manager.removeUpdates(this);
                 success.onLocation(location);
             }
@@ -193,11 +203,14 @@ final class WeatherSkill {
         try {
             manager.requestSingleUpdate(provider, listener, Looper.getMainLooper());
             main.postDelayed(() -> {
+                if (!guard.tryComplete()) return;
                 manager.removeUpdates(listener);
                 error.onError("暂时拿不到当前位置，请告诉我城市名。");
             }, 6500);
         } catch (IllegalArgumentException | SecurityException exception) {
-            error.onError("暂时拿不到当前位置，请告诉我城市名。");
+            if (guard.tryComplete()) {
+                error.onError("暂时拿不到当前位置，请告诉我城市名。");
+            }
         }
     }
 

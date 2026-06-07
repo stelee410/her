@@ -11,12 +11,12 @@ final class ToolInteractionResult<T> {
 
     private ToolInteractionResult(String tool, String question, boolean success,
             String fact, String answer, String errorMessage, T payload) {
-        this.tool = tool;
-        this.question = question;
+        this.tool = safe(tool);
+        this.question = safe(question);
         this.success = success;
-        this.fact = fact;
-        this.answer = answer;
-        this.errorMessage = errorMessage;
+        this.fact = safe(fact);
+        this.answer = safe(answer);
+        this.errorMessage = safe(errorMessage);
         this.payload = payload;
     }
 
@@ -27,7 +27,10 @@ final class ToolInteractionResult<T> {
 
     static <T> ToolInteractionResult<T> failure(String tool, String question,
             String fact, String answer, String errorMessage) {
-        return new ToolInteractionResult<>(tool, question, false, fact, answer,
-                errorMessage == null ? "" : errorMessage, null);
+        return new ToolInteractionResult<>(tool, question, false, fact, answer, errorMessage, null);
+    }
+
+    private static String safe(String value) {
+        return value == null ? "" : value;
     }
 }

@@ -2,6 +2,7 @@ package com.linkyun.her;
 
 final class RealtimeOutputCoordinator {
     interface Host {
+        boolean isVoiceSurfaceActive();
         boolean isExternalTtsPlaying();
         void interruptRealtimePlayback(String reason, boolean discardUntilDone);
         void enterRealtimeSpeaking(int sampleRate);
@@ -38,6 +39,11 @@ final class RealtimeOutputCoordinator {
     }
 
     void onStarted(int sampleRate, boolean toolTtsActive) {
+        if (!host.isVoiceSurfaceActive()) {
+            state = VoicePipelineState.RealtimeOutput.DISCARDING_UNTIL_DONE;
+            host.interruptRealtimePlayback("voice_surface_inactive", true);
+            return;
+        }
         if (toolTtsActive || host.isExternalTtsPlaying()) {
             state = VoicePipelineState.RealtimeOutput.DISCARDING_UNTIL_DONE;
             host.interruptRealtimePlayback("tts_already_playing", true);

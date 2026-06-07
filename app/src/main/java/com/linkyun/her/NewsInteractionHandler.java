@@ -27,24 +27,38 @@ final class NewsInteractionHandler {
             callback.onResult(failure(normalizedQuestion, "新闻工具不可用"));
             return;
         }
-        source.fetchDaily(new NewsTool.CallbackResult() {
-            @Override public void onSuccess(NewsTool.NewsResult result) {
-                callback.onResult(ToolInteractionResult.success(
-                        TOOL,
-                        normalizedQuestion,
-                        result.fact(normalizedQuestion),
-                        result.shortAnswer(),
-                        result));
-            }
+        try {
+            source.fetchDaily(new NewsTool.CallbackResult() {
+                @Override public void onSuccess(NewsTool.NewsResult result) {
+                    if (result == null) {
+                        callback.onResult(failure(normalizedQuestion, "新闻结果为空"));
+                        return;
+                    }
+                    ToolInteractionResult<NewsTool.NewsResult> toolResult;
+                    try {
+                        toolResult = ToolInteractionResult.success(
+                                TOOL,
+                                normalizedQuestion,
+                                result.fact(normalizedQuestion),
+                                result.shortAnswer(),
+                                result);
+                    } catch (RuntimeException error) {
+                        toolResult = failure(normalizedQuestion, "新闻结果异常：" + exceptionMessage(error));
+                    }
+                    callback.onResult(toolResult);
+                }
 
-            @Override public void onError(String message) {
-                callback.onResult(failure(normalizedQuestion, message));
-            }
-        });
+                @Override public void onError(String message) {
+                    callback.onResult(failure(normalizedQuestion, message));
+                }
+            });
+        } catch (RuntimeException error) {
+            callback.onResult(failure(normalizedQuestion, exceptionMessage(error)));
+        }
     }
 
     private static ToolInteractionResult<NewsTool.NewsResult> failure(String question, String message) {
-        String error = message == null ? "" : message;
+        String error = NewsSkill.failureMessage(message);
         return ToolInteractionResult.failure(
                 TOOL,
                 question,
@@ -56,5 +70,10 @@ final class NewsInteractionHandler {
     private static String normalizeQuestion(String question) {
         if (question == null || question.trim().isEmpty()) return "每日新闻热点";
         return question.trim();
+    }
+
+    private static String exceptionMessage(RuntimeException error) {
+        String message = error == null ? "" : error.getMessage();
+        return message == null || message.trim().isEmpty() ? "工具异常" : message.trim();
     }
 }

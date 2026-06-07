@@ -56,6 +56,93 @@ public final class WeatherInteractionHandlerTest {
         assertEquals("暂时没查到天气，没有定位权限。你可以稍后再试，或者告诉我具体城市。", result.answer);
     }
 
+    @Test
+    public void nullErrorBuildsGenericFailureResult() {
+        WeatherInteractionHandler handler = new WeatherInteractionHandler(new WeatherInteractionHandler.Source() {
+            @Override public void queryCity(String city, WeatherTool.CallbackResult callback) {
+                callback.onError(null);
+            }
+
+            @Override public void queryLocation(Location location, WeatherTool.CallbackResult callback) { }
+        });
+        List<ToolInteractionResult<WeatherTool.WeatherResult>> results = new ArrayList<>();
+
+        handler.queryCity("深圳天气", "深圳", results::add);
+
+        assertEquals(1, results.size());
+        ToolInteractionResult<WeatherTool.WeatherResult> result = results.get(0);
+        assertFalse(result.success);
+        assertEquals("工具异常", result.errorMessage);
+        assertTrue(result.fact.contains("查询失败：工具异常"));
+        assertEquals("暂时没查到天气，工具异常。你可以稍后再试，或者告诉我具体城市。", result.answer);
+    }
+
+    @Test
+    public void nullSuccessBuildsFailureResultInsteadOfCrashing() {
+        WeatherInteractionHandler handler = new WeatherInteractionHandler(new WeatherInteractionHandler.Source() {
+            @Override public void queryCity(String city, WeatherTool.CallbackResult callback) {
+                callback.onSuccess(null);
+            }
+
+            @Override public void queryLocation(Location location, WeatherTool.CallbackResult callback) { }
+        });
+        List<ToolInteractionResult<WeatherTool.WeatherResult>> results = new ArrayList<>();
+
+        handler.queryCity("深圳天气", "深圳", results::add);
+
+        assertEquals(1, results.size());
+        ToolInteractionResult<WeatherTool.WeatherResult> result = results.get(0);
+        assertFalse(result.success);
+        assertEquals("深圳天气", result.question);
+        assertEquals("天气结果为空", result.errorMessage);
+        assertTrue(result.fact.contains("查询失败：天气结果为空"));
+        assertEquals("暂时没查到天气，天气结果为空。你可以稍后再试，或者告诉我具体城市。", result.answer);
+    }
+
+    @Test
+    public void citySourceExceptionBuildsFailureResultInsteadOfCrashing() {
+        WeatherInteractionHandler handler = new WeatherInteractionHandler(new WeatherInteractionHandler.Source() {
+            @Override public void queryCity(String city, WeatherTool.CallbackResult callback) {
+                throw new RuntimeException("city boom");
+            }
+
+            @Override public void queryLocation(Location location, WeatherTool.CallbackResult callback) { }
+        });
+        List<ToolInteractionResult<WeatherTool.WeatherResult>> results = new ArrayList<>();
+
+        handler.queryCity("深圳天气", "深圳", results::add);
+
+        assertEquals(1, results.size());
+        ToolInteractionResult<WeatherTool.WeatherResult> result = results.get(0);
+        assertFalse(result.success);
+        assertEquals("深圳天气", result.question);
+        assertEquals("city boom", result.errorMessage);
+        assertTrue(result.fact.contains("查询失败：city boom"));
+        assertEquals("暂时没查到天气，city boom。你可以稍后再试，或者告诉我具体城市。", result.answer);
+    }
+
+    @Test
+    public void locationSourceExceptionWithoutMessageUsesGenericFailure() {
+        WeatherInteractionHandler handler = new WeatherInteractionHandler(new WeatherInteractionHandler.Source() {
+            @Override public void queryCity(String city, WeatherTool.CallbackResult callback) { }
+
+            @Override public void queryLocation(Location location, WeatherTool.CallbackResult callback) {
+                throw new RuntimeException();
+            }
+        });
+        List<ToolInteractionResult<WeatherTool.WeatherResult>> results = new ArrayList<>();
+
+        handler.queryLocation("当前位置天气", null, results::add);
+
+        assertEquals(1, results.size());
+        ToolInteractionResult<WeatherTool.WeatherResult> result = results.get(0);
+        assertFalse(result.success);
+        assertEquals("当前位置天气", result.question);
+        assertEquals("工具异常", result.errorMessage);
+        assertTrue(result.fact.contains("查询失败：工具异常"));
+        assertEquals("暂时没查到天气，工具异常。你可以稍后再试，或者告诉我具体城市。", result.answer);
+    }
+
     private static WeatherTool.WeatherResult sampleWeather() {
         return new WeatherTool.WeatherResult(
                 "深圳",

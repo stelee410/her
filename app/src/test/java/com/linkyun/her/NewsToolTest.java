@@ -1,7 +1,9 @@
 package com.linkyun.her;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
+import java.util.Arrays;
 import java.util.List;
 
 import org.junit.Test;
@@ -47,5 +49,43 @@ public final class NewsToolTest {
         assertEquals(8, items.size());
         assertEquals("news 0", items.get(0).title);
         assertEquals("news 7", items.get(7).title);
+    }
+
+    @Test
+    public void resultAndItemConstructorsNormalizeNullFields() {
+        NewsTool.NewsItem item = new NewsTool.NewsItem(null, null, null, null, null, null);
+        NewsTool.NewsResult result = new NewsTool.NewsResult(null, null);
+
+        assertEquals("", item.title);
+        assertEquals("", item.summary);
+        assertEquals("", item.metaText());
+        assertEquals("", item.tagText());
+        assertEquals("", item.url);
+        assertTrue(result.sourceUrl.isEmpty());
+        assertTrue(result.items.isEmpty());
+    }
+
+    @Test
+    public void resultFiltersNullItemsAndItemFiltersBlankTags() {
+        NewsTool.NewsItem item = new NewsTool.NewsItem(
+                "title",
+                "",
+                "",
+                "",
+                Arrays.asList(" ai ", null, " ", "\u00A0agent"),
+                "");
+        NewsTool.NewsResult result = new NewsTool.NewsResult("source", Arrays.asList(null, item, null));
+
+        assertEquals(1, result.items.size());
+        assertEquals(item, result.items.get(0));
+        assertEquals("ai agent", item.tagText());
+        assertTrue(result.fact("新闻").contains("1. title"));
+        assertEquals("今天 agentNews 上的热点有：\n1. title", result.shortAnswer());
+    }
+
+    @Test
+    public void failureFactUsesGenericMessageForBlankInput() {
+        assertTrue(NewsSkill.failureFact(" \u00A0 ").contains("读取失败：工具异常"));
+        assertEquals("工具异常", NewsSkill.failureMessage(null));
     }
 }

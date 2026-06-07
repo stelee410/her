@@ -68,10 +68,18 @@ final class NewsSkill {
     }
 
     static String failureFact(String message) {
-        return "【每日新闻热点结果】读取失败：" + message + "。请向用户说明暂时没读到新闻热点，并请用户稍后重试。";
+        return "【每日新闻热点结果】读取失败：" + failureMessage(message) + "。请向用户说明暂时没读到新闻热点，并请用户稍后重试。";
     }
 
     static boolean isTransientMemory(String text) {
         return text != null && (text.contains("【每日新闻热点结果】") || text.contains("【系统事件】每日新闻热点"));
+    }
+
+    static String failureMessage(String message) {
+        if (message == null) return "工具异常";
+        String clean = message.replace('\u00A0', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+        return clean.isEmpty() ? "工具异常" : clean;
     }
 }

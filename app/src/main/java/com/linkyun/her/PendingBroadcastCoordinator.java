@@ -6,6 +6,7 @@ final class PendingBroadcastCoordinator {
     }
 
     interface Host {
+        boolean isTextModeActive();
         boolean canSendWeatherNow();
         boolean canSendNewsNow();
         boolean isRealtimeOpen();
@@ -19,6 +20,7 @@ final class PendingBroadcastCoordinator {
 
     private static final long INITIAL_DELAY_MS = 1000;
     private static final long REALTIME_RECONNECT_DELAY_MS = 1400;
+    private static final long WEATHER_BUSY_RETRY_MS = 600;
     private static final long NEWS_BUSY_RETRY_MS = 600;
 
     private final Scheduler scheduler;
@@ -85,11 +87,20 @@ final class PendingBroadcastCoordinator {
         if (seq != weatherSeq) return;
         String prompt = weatherPrompt;
         if (isBlank(prompt)) return;
+        if (host.isTextModeActive()) {
+            clearWeather();
+            return;
+        }
+        if (!host.canSendWeatherNow()) {
+            retryWeather(seq, WEATHER_BUSY_RETRY_MS);
+            return;
+        }
         if (!host.isRealtimeOpen()) {
             host.connectRealtime();
             retryWeather(seq, REALTIME_RECONNECT_DELAY_MS);
             return;
         }
+        host.pushWeatherFact();
         weatherPrompt = null;
         weatherSeq++;
         host.sendRealtimeText(prompt);
@@ -101,6 +112,10 @@ final class PendingBroadcastCoordinator {
         String prompt = newsPrompt;
         if (isBlank(prompt)) return;
         host.logBroadcast("send pending news broadcast");
+        if (host.isTextModeActive()) {
+            clearNews();
+            return;
+        }
         if (!host.canSendNewsNow()) {
             retryNews(seq, NEWS_BUSY_RETRY_MS);
             return;

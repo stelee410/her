@@ -38,7 +38,11 @@ final class WeatherInteractionHandler {
             callback.onResult(failure(normalizedQuestion, "天气工具不可用"));
             return;
         }
-        source.queryCity(city, callbackFor(normalizedQuestion, callback));
+        try {
+            source.queryCity(city, callbackFor(normalizedQuestion, callback));
+        } catch (RuntimeException error) {
+            callback.onResult(failure(normalizedQuestion, exceptionMessage(error)));
+        }
     }
 
     void queryLocation(String question, Location location, Callback callback) {
@@ -47,7 +51,11 @@ final class WeatherInteractionHandler {
             callback.onResult(failure(normalizedQuestion, "天气工具不可用"));
             return;
         }
-        source.queryLocation(location, callbackFor(normalizedQuestion, callback));
+        try {
+            source.queryLocation(location, callbackFor(normalizedQuestion, callback));
+        } catch (RuntimeException error) {
+            callback.onResult(failure(normalizedQuestion, exceptionMessage(error)));
+        }
     }
 
     void fail(String question, String message, Callback callback) {
@@ -57,12 +65,22 @@ final class WeatherInteractionHandler {
     private static WeatherTool.CallbackResult callbackFor(String question, Callback callback) {
         return new WeatherTool.CallbackResult() {
             @Override public void onSuccess(WeatherTool.WeatherResult result) {
-                callback.onResult(ToolInteractionResult.success(
-                        TOOL,
-                        question,
-                        result.fact(question),
-                        result.shortAnswer(),
-                        result));
+                if (result == null) {
+                    callback.onResult(failure(question, "天气结果为空"));
+                    return;
+                }
+                ToolInteractionResult<WeatherTool.WeatherResult> toolResult;
+                try {
+                    toolResult = ToolInteractionResult.success(
+                            TOOL,
+                            question,
+                            result.fact(question),
+                            result.shortAnswer(),
+                            result);
+                } catch (RuntimeException error) {
+                    toolResult = failure(question, "天气结果异常：" + exceptionMessage(error));
+                }
+                callback.onResult(toolResult);
             }
 
             @Override public void onError(String message) {
@@ -72,7 +90,7 @@ final class WeatherInteractionHandler {
     }
 
     private static ToolInteractionResult<WeatherTool.WeatherResult> failure(String question, String message) {
-        String error = message == null ? "" : message;
+        String error = WeatherSkill.failureMessage(message);
         return ToolInteractionResult.failure(
                 TOOL,
                 question,
@@ -84,5 +102,10 @@ final class WeatherInteractionHandler {
     private static String normalizeQuestion(String question) {
         if (question == null || question.trim().isEmpty()) return "天气";
         return question.trim();
+    }
+
+    private static String exceptionMessage(RuntimeException error) {
+        String message = error == null ? "" : error.getMessage();
+        return message == null || message.trim().isEmpty() ? "工具异常" : message.trim();
     }
 }

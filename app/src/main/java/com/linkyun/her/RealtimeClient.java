@@ -33,7 +33,9 @@ final class RealtimeClient extends WebSocketListener {
     private final OkHttpClient http = new OkHttpClient.Builder()
             .pingInterval(20, TimeUnit.SECONDS)
             .build();
+    private final RealtimeCallbackGate callbackGate = new RealtimeCallbackGate();
     private WebSocket socket;
+    private int socketGeneration;
     private boolean sessionCreated = false;
 
     RealtimeClient(String tag, Host host) {
@@ -63,6 +65,7 @@ final class RealtimeClient extends WebSocketListener {
                 .url(BuildConfig.AGENTVOICE_REALTIME_URL + "?api_key=" + key)
                 .build();
         socket = http.newWebSocket(request, this);
+        socketGeneration = callbackGate.nextGeneration();
     }
 
     @Override public void onOpen(WebSocket webSocket, Response response) {
@@ -80,14 +83,15 @@ final class RealtimeClient extends WebSocketListener {
             Log.d(tag, "ignore stale websocket message");
             return;
         }
+        int generation = socketGeneration;
         try {
             JSONObject event = new JSONObject(text);
             JSONObject payload = event.optJSONObject("payload");
             String type = event.optString("type");
             Log.d(tag, "event " + type + " payload=" + (payload == null ? "{}" : payload.toString()));
-            host.mainHandler().post(() -> host.onRealtimeEvent(type, payload));
+            postIfCurrent(webSocket, generation, () -> host.onRealtimeEvent(type, payload));
         } catch (JSONException e) {
-            host.onRealtimeError("Bad realtime event");
+            postIfCurrent(webSocket, generation, () -> host.onRealtimeError("Bad realtime event"));
         }
     }
 
@@ -105,10 +109,15 @@ final class RealtimeClient extends WebSocketListener {
             Log.d(tag, "ignore stale websocket failure");
             return;
         }
+        int generation = socketGeneration;
         socket = null;
         sessionCreated = false;
         Log.e(tag, "websocket failure", t);
-        host.mainHandler().post(() -> host.onRealtimeError(t.getMessage() == null ? "Realtime failed" : t.getMessage()));
+        host.mainHandler().post(() -> {
+            if (callbackGate.accepts(generation)) {
+                host.onRealtimeError(t.getMessage() == null ? "Realtime failed" : t.getMessage());
+            }
+        });
     }
 
     @Override public void onClosed(WebSocket webSocket, int code, String reason) {
@@ -116,10 +125,13 @@ final class RealtimeClient extends WebSocketListener {
             Log.d(tag, "ignore stale websocket closed code=" + code + " reason=" + reason);
             return;
         }
+        int generation = socketGeneration;
         socket = null;
         sessionCreated = false;
         Log.d(tag, "websocket closed code=" + code + " reason=" + reason);
-        host.mainHandler().post(host::onRealtimeClosed);
+        host.mainHandler().post(() -> {
+            if (callbackGate.accepts(generation)) host.onRealtimeClosed();
+        });
     }
 
     void markSessionCreated() {
@@ -132,6 +144,7 @@ final class RealtimeClient extends WebSocketListener {
             socket.close(1000, "client closing");
             socket = null;
         }
+        callbackGate.invalidate();
     }
 
     void sendInputText(String text) {
@@ -160,5 +173,11 @@ final class RealtimeClient extends WebSocketListener {
             if (payload != null) envelope.put("payload", payload);
         } catch (JSONException ignored) { }
         target.send(envelope.toString());
+    }
+
+    private void postIfCurrent(WebSocket webSocket, int generation, Runnable runnable) {
+        host.mainHandler().post(() -> {
+            if (webSocket == socket && callbackGate.accepts(generation)) runnable.run();
+        });
     }
 }

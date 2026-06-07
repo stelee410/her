@@ -6,6 +6,8 @@ final class ToolTtsCoordinator {
     }
 
     interface Host {
+        boolean isTextModeActive();
+        boolean isVoiceSurfaceActive();
         boolean isRealtimePlaybackActive();
         boolean shouldDeferStart();
         boolean isSpeakingState();
@@ -33,6 +35,7 @@ final class ToolTtsCoordinator {
     private VoicePipelineState.ToolTts state = VoicePipelineState.ToolTts.IDLE;
     private String pendingId;
     private String pendingText;
+    private String activePlaybackId;
 
     ToolTtsCoordinator(Scheduler scheduler, Host host) {
         this.scheduler = scheduler;
@@ -56,13 +59,16 @@ final class ToolTtsCoordinator {
 
     void queue(String source, String text) {
         if (text == null || text.trim().isEmpty()) return;
+        if (host.isTextModeActive()) return;
+        if (!host.isVoiceSurfaceActive()) return;
         pendingId = source + "-" + System.currentTimeMillis();
         pendingText = text.trim();
+        String queuedId = pendingId;
         state = VoicePipelineState.ToolTts.QUEUED;
         host.logToolTts("queue source=" + source + " len=" + pendingText.length());
         if (host.shouldDeferStart()) {
             scheduler.postDelayed(() -> {
-                if (hasPendingPlayback() && !host.isSpeakingState()) {
+                if (isPendingCallback(queuedId) && !host.isSpeakingState()) {
                     startPending(false);
                 }
             }, DEFERRED_START_MS);
@@ -73,12 +79,21 @@ final class ToolTtsCoordinator {
 
     void startPending(boolean force) {
         if (!hasPendingPlayback()) return;
+        if (host.isTextModeActive()) {
+            discardPendingForTextMode();
+            return;
+        }
+        if (!host.isVoiceSurfaceActive()) {
+            discardPendingForInactiveSurface();
+            return;
+        }
         if (!force && host.isRealtimePlaybackActive()) {
             state = VoicePipelineState.ToolTts.WAITING_REALTIME_STOP;
             host.logToolTts("waiting for realtime stop");
             host.interruptRealtimePlayback("tool_tts_playback", true);
+            String interruptedId = pendingId;
             scheduler.postDelayed(() -> {
-                if (hasPendingPlayback()) {
+                if (isPendingCallback(interruptedId)) {
                     host.logToolTts("force start after realtime interrupt");
                     startPending(true);
                 }
@@ -91,9 +106,23 @@ final class ToolTtsCoordinator {
         pendingId = null;
         pendingText = null;
         if (id == null) id = "tool-" + System.currentTimeMillis();
+        activePlaybackId = id;
         host.prepareToolTtsPlayback();
         host.playToolTts(id, text, new PlaybackListener() {
             @Override public void onStarted(String startedId, String spokenText) {
+                if (!isActiveCallback(startedId)) return;
+                if (host.isTextModeActive()) {
+                    activePlaybackId = null;
+                    state = VoicePipelineState.ToolTts.IDLE;
+                    host.onToolTtsFinished(startedId);
+                    return;
+                }
+                if (!host.isVoiceSurfaceActive()) {
+                    activePlaybackId = null;
+                    state = VoicePipelineState.ToolTts.IDLE;
+                    host.onToolTtsFinished(startedId);
+                    return;
+                }
                 state = VoicePipelineState.ToolTts.PLAYING;
                 host.onToolTtsStarted(startedId, spokenText);
             }
@@ -103,6 +132,7 @@ final class ToolTtsCoordinator {
             }
 
             @Override public void onError(String failedId, String message) {
+                if (!isActiveCallback(failedId)) return;
                 host.logToolTts("failed: " + message);
                 finish(failedId);
             }
@@ -123,14 +153,43 @@ final class ToolTtsCoordinator {
     void stop(boolean resumeListening) {
         pendingId = null;
         pendingText = null;
+        activePlaybackId = null;
         state = VoicePipelineState.ToolTts.IDLE;
         host.onToolTtsFinished(null);
-        if (resumeListening) host.resumeListeningAfterToolTts(80);
+        if (resumeListening && host.isVoiceSurfaceActive()) host.resumeListeningAfterToolTts(80);
     }
 
     private void finish(String id) {
+        if (!isActiveCallback(id)) return;
+        activePlaybackId = null;
         state = VoicePipelineState.ToolTts.IDLE;
         host.onToolTtsFinished(id);
-        host.resumeListeningAfterToolTts(RESUME_AFTER_PLAYBACK_MS);
+        if (!host.isTextModeActive() && host.isVoiceSurfaceActive()) {
+            host.resumeListeningAfterToolTts(RESUME_AFTER_PLAYBACK_MS);
+        }
+    }
+
+    private void discardPendingForTextMode() {
+        pendingId = null;
+        pendingText = null;
+        activePlaybackId = null;
+        state = VoicePipelineState.ToolTts.IDLE;
+        host.onToolTtsFinished(null);
+    }
+
+    private void discardPendingForInactiveSurface() {
+        pendingId = null;
+        pendingText = null;
+        activePlaybackId = null;
+        state = VoicePipelineState.ToolTts.IDLE;
+        host.onToolTtsFinished(null);
+    }
+
+    private boolean isActiveCallback(String id) {
+        return activePlaybackId != null && activePlaybackId.equals(id);
+    }
+
+    private boolean isPendingCallback(String id) {
+        return pendingId != null && pendingId.equals(id) && hasPendingPlayback();
     }
 }

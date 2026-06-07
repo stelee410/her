@@ -56,6 +56,10 @@ final class VoiceInputCoordinator {
             clearPendingStart();
             return;
         }
+        if (!host.isVoiceSurfaceActive()) {
+            clearPendingStart();
+            return;
+        }
         if (host.isInputActive()) return;
         if (!host.isBoundHeadsetConnected()) {
             if (showHeadsetPrompt) host.showHeadsetPrompt();
@@ -74,7 +78,7 @@ final class VoiceInputCoordinator {
         pendingStart = true;
         pendingInterruptReason = interruptReason;
         if (host.isRealtimeOpen()) {
-            startPendingNow();
+            startPendingNow(false);
         } else {
             host.connectRealtime();
         }
@@ -87,7 +91,7 @@ final class VoiceInputCoordinator {
             return;
         }
         if (host.isRealtimeOpen()) {
-            startPendingNow();
+            startPendingNow(false);
         } else {
             host.connectRealtime();
         }
@@ -99,7 +103,7 @@ final class VoiceInputCoordinator {
 
     boolean onRealtimeReady() {
         if (!pendingStart) return false;
-        startPendingNow();
+        startPendingNow(true);
         return true;
     }
 
@@ -108,6 +112,7 @@ final class VoiceInputCoordinator {
         scheduler.postDelayed(() -> {
             if (!host.isVoiceSurfaceActive()) return;
             if (host.isInputActive()) return;
+            if (host.hasActiveToolTtsPlayback()) return;
             requestStart(false, null, false);
         }, delayMs);
     }
@@ -115,6 +120,7 @@ final class VoiceInputCoordinator {
     void startContinuousListening() {
         if (!continuousConversation) return;
         if (host.isTextModeActive()) return;
+        if (!host.isVoiceSurfaceActive()) return;
         if (host.hasActiveToolTtsPlayback()) return;
         if (host.isInputActive() || !host.isRealtimeOpen()) return;
         if (!host.isBoundHeadsetConnected()) return;
@@ -129,6 +135,7 @@ final class VoiceInputCoordinator {
         scheduler.postDelayed(() -> {
             if (seq != continuousSeq) return;
             if (host.isTextModeActive()) return;
+            if (!host.isVoiceSurfaceActive()) return;
             if (host.hasActiveToolTtsPlayback()) return;
             if (host.isReadyForContinuousListening() && !host.isInputActive()) {
                 startContinuousListening();
@@ -145,8 +152,12 @@ final class VoiceInputCoordinator {
         pendingInterruptReason = null;
     }
 
-    private void startPendingNow() {
+    private void startPendingNow(boolean keepPendingWithoutPermission) {
         if (host.isTextModeActive()) {
+            clearPendingStart();
+            return;
+        }
+        if (!host.isVoiceSurfaceActive()) {
             clearPendingStart();
             return;
         }
@@ -158,7 +169,10 @@ final class VoiceInputCoordinator {
             clearPendingStart();
             return;
         }
-        if (!host.hasRecordPermission()) return;
+        if (!host.hasRecordPermission()) {
+            if (!keepPendingWithoutPermission) clearPendingStart();
+            return;
+        }
         String interruptReason = pendingInterruptReason;
         clearPendingStart();
         host.logVoiceInput("start input interruptReason=" + interruptReason);

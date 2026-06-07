@@ -34,17 +34,23 @@ final class HerUi {
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setPadding(dp(22), dp(20), dp(22), 0);
         TextView l = icon(left);
-        l.setOnClickListener(v -> {
-            if (leftAction != null) leftAction.run();
-        });
+        if (leftAction != null) {
+            l.setOnClickListener(v -> leftAction.run());
+        } else {
+            l.setClickable(false);
+            l.setFocusable(false);
+        }
         bar.addView(l, new LinearLayout.LayoutParams(dp(54), dp(58)));
         TextView middle = text(title, 18, Color.WHITE, 500);
         middle.setGravity(Gravity.CENTER);
         bar.addView(middle, new LinearLayout.LayoutParams(0, dp(58), 1));
         TextView r = icon(right);
-        r.setOnClickListener(v -> {
-            if (rightAction != null) rightAction.run();
-        });
+        if (rightAction != null) {
+            r.setOnClickListener(v -> rightAction.run());
+        } else {
+            r.setClickable(false);
+            r.setFocusable(false);
+        }
         bar.addView(r, new LinearLayout.LayoutParams(dp(54), dp(58)));
         bar.setLayoutParams(frame(-1, dp(86), Gravity.TOP));
         return bar;

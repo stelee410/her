@@ -125,8 +125,8 @@ final class NewsTool {
         final List<NewsItem> items;
 
         NewsResult(String sourceUrl, List<NewsItem> items) {
-            this.sourceUrl = sourceUrl;
-            this.items = items;
+            this.sourceUrl = cleanText(sourceUrl);
+            this.items = cleanItems(items);
         }
 
         String fact(String userQuestion) {
@@ -169,12 +169,12 @@ final class NewsTool {
         final String url;
 
         NewsItem(String title, String summary, String date, String category, List<String> tags, String url) {
-            this.title = title;
-            this.summary = summary;
-            this.date = date;
-            this.category = category;
-            this.tags = tags;
-            this.url = url;
+            this.title = cleanText(title);
+            this.summary = cleanText(summary);
+            this.date = cleanText(date);
+            this.category = cleanText(category);
+            this.tags = cleanTags(tags);
+            this.url = cleanText(url);
         }
 
         String metaText() {
@@ -192,5 +192,24 @@ final class NewsTool {
             }
             return builder.toString();
         }
+    }
+
+    private static List<NewsItem> cleanItems(List<NewsItem> items) {
+        if (items == null || items.isEmpty()) return Collections.emptyList();
+        List<NewsItem> cleaned = new ArrayList<>();
+        for (NewsItem item : items) {
+            if (item != null) cleaned.add(item);
+        }
+        return cleaned.isEmpty() ? Collections.emptyList() : Collections.unmodifiableList(cleaned);
+    }
+
+    private static List<String> cleanTags(List<String> tags) {
+        if (tags == null || tags.isEmpty()) return Collections.emptyList();
+        List<String> cleaned = new ArrayList<>();
+        for (String tag : tags) {
+            String clean = cleanText(tag);
+            if (!clean.isEmpty()) cleaned.add(clean);
+        }
+        return cleaned.isEmpty() ? Collections.emptyList() : Collections.unmodifiableList(cleaned);
     }
 }

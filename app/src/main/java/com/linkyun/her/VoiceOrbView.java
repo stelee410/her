@@ -11,7 +11,7 @@ final class VoiceOrbView extends HerMarkView {
     final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
     long started = SystemClock.uptimeMillis();
     int level = 0;
-    String conversationState = "idle";
+    VoiceOrbVisualState visualState = VoiceOrbVisualState.from(VoiceSessionState.initial());
 
     VoiceOrbView(Activity activity) {
         super(activity);
@@ -22,8 +22,8 @@ final class VoiceOrbView extends HerMarkView {
         invalidate();
     }
 
-    void setConversationState(String next) {
-        conversationState = next == null ? "idle" : next;
+    void setConversationState(VoiceSessionState next) {
+        visualState = VoiceOrbVisualState.from(next);
         invalidate();
     }
 
@@ -38,19 +38,12 @@ final class VoiceOrbView extends HerMarkView {
         float h = getHeight();
         float cx = w / 2f;
         float cy = h / 2f;
-        float energy = level / 100f;
-        if ("speaking".equals(conversationState)) {
-            energy = Math.max(energy, 0.34f + 0.14f * (float) Math.sin(t * Math.PI * 4));
-        } else if ("thinking".equals(conversationState) || "processing".equals(conversationState) || "connecting".equals(conversationState)) {
-            energy = Math.max(energy, 0.18f + 0.08f * (float) Math.sin(t * Math.PI * 2));
-        } else if ("listening".equals(conversationState)) {
-            energy = Math.max(energy, 0.12f);
-        }
+        float energy = visualState.energy(level / 100f, t);
 
         float base = Math.min(w, h) * (0.35f + energy * 0.035f);
         glow.setStyle(Paint.Style.FILL);
         glow.setShader(new LinearGradient(0, 0, w, h,
-                0x33FFFFFF, "listening".equals(conversationState) ? 0x33FF6377 : 0x22B96A7C,
+                0x33FFFFFF, visualState.accentColor,
                 Shader.TileMode.CLAMP));
         canvas.drawCircle(cx, cy, base + dp(18) * energy, glow);
         glow.setShader(null);

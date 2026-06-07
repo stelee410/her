@@ -36,6 +36,57 @@ public final class PendingBroadcastCoordinatorTest {
     }
 
     @Test
+    public void textModeDropsPendingWeatherWithoutConnectingOrSending() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.textMode = true;
+        host.realtimeOpen = false;
+        PendingBroadcastCoordinator coordinator = new PendingBroadcastCoordinator(scheduler, host);
+
+        coordinator.queueWeather("weather");
+        scheduler.runDelay(1000);
+
+        assertEquals(0, host.connectCount);
+        assertEquals(0, host.sentTexts.size());
+        assertEquals(false, coordinator.hasPendingWeather());
+    }
+
+    @Test
+    public void weatherRetriesWhileBusyThenSends() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        PendingBroadcastCoordinator coordinator = new PendingBroadcastCoordinator(scheduler, host);
+
+        coordinator.queueWeather("weather");
+        host.weatherReady = false;
+        scheduler.runDelay(1000);
+        assertEquals(0, host.sentTexts.size());
+
+        host.weatherReady = true;
+        scheduler.runDelay(600);
+
+        assertEquals(1, host.sentTexts.size());
+        assertEquals("weather", host.sentTexts.get(0));
+    }
+
+    @Test
+    public void clearedWeatherPromptDoesNotSendAfterBusyRetry() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        PendingBroadcastCoordinator coordinator = new PendingBroadcastCoordinator(scheduler, host);
+
+        coordinator.queueWeather("weather");
+        host.weatherReady = false;
+        scheduler.runDelay(1000);
+        coordinator.clearWeather();
+
+        host.weatherReady = true;
+        scheduler.runDelay(600);
+
+        assertEquals(0, host.sentTexts.size());
+    }
+
+    @Test
     public void newsRetriesWhileBusyThenSends() {
         ManualScheduler scheduler = new ManualScheduler();
         FakeHost host = new FakeHost();
@@ -50,6 +101,59 @@ public final class PendingBroadcastCoordinatorTest {
         scheduler.runDelay(600);
         assertEquals(1, host.sentTexts.size());
         assertEquals("news", host.sentTexts.get(0));
+    }
+
+    @Test
+    public void clearedNewsPromptDoesNotSendAfterBusyRetry() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        PendingBroadcastCoordinator coordinator = new PendingBroadcastCoordinator(scheduler, host);
+
+        coordinator.queueNews("news");
+        host.newsReady = false;
+        scheduler.runDelay(1000);
+        coordinator.clearNews();
+
+        host.newsReady = true;
+        scheduler.runDelay(600);
+
+        assertEquals(0, host.sentTexts.size());
+    }
+
+    @Test
+    public void textModeDropsPendingNewsWithoutConnectingOrSending() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.textMode = true;
+        host.realtimeOpen = false;
+        PendingBroadcastCoordinator coordinator = new PendingBroadcastCoordinator(scheduler, host);
+
+        coordinator.queueNews("news");
+        scheduler.runDelay(1000);
+
+        assertEquals(0, host.connectCount);
+        assertEquals(0, host.sentTexts.size());
+        assertEquals(false, coordinator.hasPendingNews());
+    }
+
+    @Test
+    public void newsConnectsRealtimeBeforeSendingAndPushesFactAgain() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        host.realtimeOpen = false;
+        PendingBroadcastCoordinator coordinator = new PendingBroadcastCoordinator(scheduler, host);
+
+        coordinator.queueNews("news");
+        scheduler.runDelay(1000);
+        assertEquals(1, host.connectCount);
+        assertEquals(0, host.sentTexts.size());
+
+        host.realtimeOpen = true;
+        scheduler.runDelay(1400);
+
+        assertEquals(1, host.sentTexts.size());
+        assertEquals("news", host.sentTexts.get(0));
+        assertEquals(2, host.newsFactPushCount);
     }
 
     @Test
@@ -68,6 +172,20 @@ public final class PendingBroadcastCoordinatorTest {
         scheduler.runDelay(1400);
         assertEquals(1, host.sentTexts.size());
         assertEquals("weather", host.sentTexts.get(0));
+        assertEquals(2, host.weatherFactPushCount);
+    }
+
+    @Test
+    public void weatherPushesFactAgainBeforeSendingWhenRealtimeWasAlreadyOpen() {
+        ManualScheduler scheduler = new ManualScheduler();
+        FakeHost host = new FakeHost();
+        PendingBroadcastCoordinator coordinator = new PendingBroadcastCoordinator(scheduler, host);
+
+        coordinator.queueWeather("weather");
+        scheduler.runDelay(1000);
+
+        assertEquals(1, host.sentTexts.size());
+        assertEquals(2, host.weatherFactPushCount);
     }
 
     private static final class ManualScheduler implements PendingBroadcastCoordinator.Scheduler {
@@ -100,11 +218,18 @@ public final class PendingBroadcastCoordinatorTest {
     }
 
     private static final class FakeHost implements PendingBroadcastCoordinator.Host {
+        boolean textMode;
         boolean weatherReady = true;
         boolean newsReady = true;
         boolean realtimeOpen = true;
         int connectCount;
+        int weatherFactPushCount;
+        int newsFactPushCount;
         final List<String> sentTexts = new ArrayList<>();
+
+        @Override public boolean isTextModeActive() {
+            return textMode;
+        }
 
         @Override public boolean canSendWeatherNow() {
             return weatherReady;
@@ -123,9 +248,11 @@ public final class PendingBroadcastCoordinatorTest {
         }
 
         @Override public void pushWeatherFact() {
+            weatherFactPushCount++;
         }
 
         @Override public void pushNewsFact() {
+            newsFactPushCount++;
         }
 
         @Override public void sendRealtimeText(String text) {
