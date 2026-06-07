@@ -106,6 +106,37 @@ public final class VoiceInputCoordinatorTest {
         assertFalse(coordinator.hasPendingStart());
     }
 
+    @Test
+    public void permissionGrantAfterTextModeDoesNotStartInput() {
+        Host host = new Host();
+        host.permission = false;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.requestStart(true, "manual", true);
+        assertTrue(coordinator.hasPendingStart());
+
+        host.textMode = true;
+        host.permission = true;
+        coordinator.onRecordPermissionGranted();
+
+        assertFalse(coordinator.hasPendingStart());
+        assertEquals(0, host.startCount);
+    }
+
+    @Test
+    public void headsetPromptIsOnlyShownForPromptedStarts() {
+        Host host = new Host();
+        host.bound = false;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.requestStart(false, null, false);
+        assertEquals(0, host.events.size());
+
+        coordinator.requestStart(true, "manual", true);
+        assertEquals("headset", host.events.get(0));
+        assertFalse(coordinator.hasPendingStart());
+    }
+
     private static final class Host implements VoiceInputCoordinator.Scheduler, VoiceInputCoordinator.Host {
         final List<String> events = new ArrayList<>();
         final List<Runnable> scheduled = new ArrayList<>();

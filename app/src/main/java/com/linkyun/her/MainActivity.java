@@ -676,9 +676,7 @@ public class MainActivity extends Activity {
 
     private void startVoiceFromAssistantCommand() {
         if (summaryInProgress || mic.running || inputAudioOpen) return;
-        if (voiceInput != null) {
-            voiceInput.requestStart(true, "assistant_launch", true);
-        }
+        requestVoiceInputStart(true, "assistant_launch", true);
     }
 
     private void setupHeadsetMediaSession() {
@@ -2266,7 +2264,11 @@ public class MainActivity extends Activity {
     }
 
     private void requestVoiceInputStart(boolean requestPermission) {
-        if (voiceInput != null) voiceInput.requestStart(requestPermission, null, false);
+        requestVoiceInputStart(requestPermission, null, false);
+    }
+
+    private void requestVoiceInputStart(boolean requestPermission, String interruptReason, boolean showHeadsetPrompt) {
+        if (voiceInput != null) voiceInput.requestStart(requestPermission, interruptReason, showHeadsetPrompt);
     }
 
     private void stopToolTtsPlayback(boolean resumeListening) {
@@ -2402,7 +2404,7 @@ public class MainActivity extends Activity {
             stopInputAudio("processing");
             return;
         }
-        if (voiceInput != null) voiceInput.requestStart(true, "user_speech_detected", true);
+        requestVoiceInputStart(true, "user_speech_detected", true);
     }
 
     private void interruptNewsPlayback() {
@@ -2914,7 +2916,9 @@ public class MainActivity extends Activity {
                     HeadsetBindingManager.Device device = devices.get(which);
                     headsets.bind(device);
                     toastError("已绑定 " + device.label + "。");
-                    if (startVoiceAfterBind) main.postDelayed(this::toggleMic, 180);
+                    if (startVoiceAfterBind) {
+                        main.postDelayed(() -> requestVoiceInputStart(true, "user_speech_detected", false), 180);
+                    }
                 })
                 .setNegativeButton("继续文字聊天", (dialog, which) -> {
                     headsetDialogShowing = false;
