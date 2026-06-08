@@ -74,6 +74,7 @@ public class MainActivity extends Activity {
     private static final String TEXT_CHAT_MODEL = "c-her";
     private static final String BACKGROUND_MODEL = "c-her";
     private static final String PREF_DEMO_MODE = "demo_mode";
+    private static final String PREF_DIGITAL_AVATAR_ENABLED = "digital_avatar_enabled";
     private static final String[] AGENT_NAME_CANDIDATE_NAMES = {
             "Ava", "Chloe", "Nora", "Clara", "Mira", "Aria",
             "Iris", "Luna", "Elara", "Serena", "Evelyn", "Victoria"
@@ -188,6 +189,7 @@ public class MainActivity extends Activity {
     private int initUserTurns = 0;
     private boolean headsetDialogShowing = false;
     private boolean demoMode = false;
+    private boolean digitalAvatarEnabled = false;
     private boolean voiceInputSurfaceActive = false;
     private boolean compactInProgress = false;
     private boolean memoryDirtyForRealtime = false;
@@ -228,6 +230,7 @@ public class MainActivity extends Activity {
     private TextView handwrittenNameView;
     private AudioLevelView audioLevelView;
     private VoiceOrbView voiceOrbView;
+    private DigitalAvatarView digitalAvatarView;
     private MoodVeil moodVeil;
     private Runnable homeClockTicker;
     private Runnable initProgressTicker;
@@ -287,6 +290,7 @@ public class MainActivity extends Activity {
         headsets = new HeadsetBindingManager(this, prefs, this::onHeadsetDevicesChanged);
         headsets.start();
         demoMode = prefs.getBoolean(PREF_DEMO_MODE, false);
+        digitalAvatarEnabled = prefs.getBoolean(PREF_DIGITAL_AVATAR_ENABLED, false);
         headsetController = createHeadsetController();
         setupHeadsetMediaSession();
         memoryStore = new MemoryStore(this);
@@ -1631,6 +1635,7 @@ public class MainActivity extends Activity {
         root = views.root;
         moodVeil = views.moodVeil;
         stateLabel = null;
+        digitalAvatarView = null;
         homeTimeView = views.homeTimeView;
         handwrittenNameView = views.handwrittenNameView;
         setContentView(root);
@@ -1654,7 +1659,9 @@ public class MainActivity extends Activity {
                         stateLabelText(),
                         moodForText(lastConversationLine()),
                         voiceCards == null ? null : voiceCards.latestWeather(),
-                        voiceCards == null ? null : voiceCards.latestNews()),
+                        voiceCards == null ? null : voiceCards.latestNews(),
+                        digitalAvatarEnabled,
+                        voiceState.isSpeaking()),
                 new HomePage.Callbacks() {
                     @Override public void onSettings() { showSettings(); }
                     @Override public void onChat() { showChat(); }
@@ -1664,6 +1671,7 @@ public class MainActivity extends Activity {
         root = views.root;
         moodVeil = views.moodVeil;
         voiceOrbView = views.voiceOrbView;
+        digitalAvatarView = views.digitalAvatarView;
         voiceLastTurnView = views.voiceLastTurnView;
         stateLabel = views.stateLabel;
         audioLevelView = views.audioLevelView;
@@ -2033,6 +2041,7 @@ public class MainActivity extends Activity {
     private void clearVoiceSurfaceViews() {
         voiceLastTurnView = null;
         voiceOrbView = null;
+        digitalAvatarView = null;
         audioLevelView = null;
         micButton = null;
         textAsrButton = null;
@@ -2102,6 +2111,8 @@ public class MainActivity extends Activity {
         list.addView(navRow("↺", "Reinitialize", "Reset memory", this::resetInitialization));
         list.addView(navRow("⌫", "Clear Session", "Keep memory", this::clearCurrentSession));
         list.addView(navRow("▣", "演示模式", demoMode ? "On · 本机麦克风与 Speaker" : "Off", this::showDemoModePrompt));
+        list.addView(navRow("◌", "Enable 数字形象", digitalAvatarEnabled ? "On · Voice chat" : "Off",
+                () -> setDigitalAvatarEnabled(!digitalAvatarEnabled)));
         list.addView(ui.navRow(R.drawable.ic_headphones, "Headphones", headsetSettingsLabel(), () -> showHeadsetPrompt(false)));
         list.addView(navRow("≋", "Voice", selectedVoiceLabel, this::showVoices));
         list.addView(navRow("♬", "Sound", "76%", null));
@@ -2142,6 +2153,15 @@ public class MainActivity extends Activity {
                     realtime.isOpen(),
                     isBoundHeadsetConnected());
         }
+        showSettings();
+    }
+
+    private void setDigitalAvatarEnabled(boolean enabled) {
+        if (digitalAvatarEnabled == enabled) return;
+        digitalAvatarEnabled = enabled;
+        getSharedPreferences("her", MODE_PRIVATE).edit()
+                .putBoolean(PREF_DIGITAL_AVATAR_ENABLED, digitalAvatarEnabled)
+                .apply();
         showSettings();
     }
 
@@ -2308,6 +2328,7 @@ public class MainActivity extends Activity {
         if (voiceLastTurnView != null) voiceLastTurnView.setText(line);
         if (moodVeil != null) moodVeil.setMood(moodForText(line));
         if (voiceOrbView != null) voiceOrbView.setConversationState(voiceState);
+        if (digitalAvatarView != null) digitalAvatarView.setSpeaking(voiceState.isSpeaking());
         if (micButton != null) micButton.setText(mic.running || inputAudioOpen ? "●" : voiceButtonText());
     }
 
@@ -3346,6 +3367,7 @@ public class MainActivity extends Activity {
         if (micButton != null) micButton.setText(voiceState.isListening() ? "●" : voiceButtonText());
         refreshTextModeAsrControls();
         if (voiceOrbView != null) voiceOrbView.setConversationState(voiceState);
+        if (digitalAvatarView != null) digitalAvatarView.setSpeaking(voiceState.isSpeaking());
         if (voiceState.shouldApplyContextUpdateForNextTurn()) {
             applyContextUpdateForNextTurn(false);
         }
