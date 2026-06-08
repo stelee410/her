@@ -63,17 +63,18 @@ final class HomePage {
 
         LinearLayout center = new LinearLayout(activity);
         center.setOrientation(LinearLayout.VERTICAL);
-        center.setGravity(Gravity.CENTER);
-        center.setPadding(ui.dp(30), 0, ui.dp(30), ui.dp(86));
+        center.setGravity(model.digitalAvatarEnabled ? Gravity.TOP | Gravity.CENTER_HORIZONTAL : Gravity.CENTER);
+        center.setPadding(ui.dp(30), model.digitalAvatarEnabled ? ui.dp(108) : 0, ui.dp(30),
+                model.digitalAvatarEnabled ? 0 : ui.dp(86));
         root.addView(center, ui.frame(-1, -1));
 
         VoiceOrbView voiceOrbView = null;
         DigitalAvatarView digitalAvatarView = null;
         if (model.digitalAvatarEnabled) {
             digitalAvatarView = new DigitalAvatarView(activity);
-            digitalAvatarView.setOnClickListener(v -> callbacks.onToggleMic());
-            digitalAvatarView.setSpeaking(model.avatarSpeaking);
-            center.addView(digitalAvatarView, new LinearLayout.LayoutParams(ui.dp(220), ui.dp(392)));
+            digitalAvatarView.setAvatarState(model.avatarEmotion, model.avatarSpeaking);
+            FrameLayout.LayoutParams avatarParams = ui.frame(ui.dp(600), ui.dp(800), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            root.addView(digitalAvatarView, avatarParams);
         } else {
             voiceOrbView = new VoiceOrbView(activity);
             voiceOrbView.setOnClickListener(v -> callbacks.onToggleMic());
@@ -94,17 +95,21 @@ final class HomePage {
         stateParams.topMargin = ui.dp(16);
         center.addView(stateLabel, stateParams);
 
-        AudioLevelView audioLevelView = new AudioLevelView(activity);
-        FrameLayout.LayoutParams levelParams = ui.frame(ui.dp(190), ui.dp(12), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        levelParams.bottomMargin = ui.dp(94);
-        root.addView(audioLevelView, levelParams);
+        AudioLevelView audioLevelView = null;
+        TextView micButton = null;
+        if (!model.digitalAvatarEnabled) {
+            audioLevelView = new AudioLevelView(activity);
+            FrameLayout.LayoutParams levelParams = ui.frame(ui.dp(190), ui.dp(12), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            levelParams.bottomMargin = ui.dp(94);
+            root.addView(audioLevelView, levelParams);
 
-        TextView micButton = ui.text("♩", 36, 0xFFFF6377, 0);
-        micButton.setGravity(Gravity.CENTER);
-        micButton.setOnClickListener(v -> callbacks.onToggleMic());
-        FrameLayout.LayoutParams micParams = ui.frame(ui.dp(78), ui.dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        micParams.bottomMargin = ui.dp(18);
-        root.addView(micButton, micParams);
+            micButton = ui.text("♩", 36, 0xFFFF6377, 0);
+            micButton.setGravity(Gravity.CENTER);
+            micButton.setOnClickListener(v -> callbacks.onToggleMic());
+            FrameLayout.LayoutParams micParams = ui.frame(ui.dp(78), ui.dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            micParams.bottomMargin = ui.dp(18);
+            root.addView(micButton, micParams);
+        }
 
         if (model.weather != null) {
             View weatherCard = WeatherCard.voice(activity, ui, model.weather);
@@ -122,6 +127,9 @@ final class HomePage {
             root.addView(newsCard, newsParams);
         }
 
+        if (model.digitalAvatarEnabled) center.bringToFront();
+        if (audioLevelView != null) audioLevelView.bringToFront();
+        if (micButton != null) micButton.bringToFront();
         top.bringToFront();
         return new Views(root, rootState.moodVeil, voiceOrbView, digitalAvatarView, voiceLastTurnView, stateLabel, audioLevelView, micButton, null, null);
     }
@@ -153,9 +161,10 @@ final class HomePage {
         final NewsTool.NewsResult news;
         final boolean digitalAvatarEnabled;
         final boolean avatarSpeaking;
+        final String avatarEmotion;
 
         VoiceModel(String lastLine, String stateLabel, int mood, WeatherTool.WeatherResult weather, NewsTool.NewsResult news,
-                boolean digitalAvatarEnabled, boolean avatarSpeaking) {
+                boolean digitalAvatarEnabled, boolean avatarSpeaking, String avatarEmotion) {
             this.lastLine = lastLine;
             this.stateLabel = stateLabel;
             this.mood = mood;
@@ -163,6 +172,7 @@ final class HomePage {
             this.news = news;
             this.digitalAvatarEnabled = digitalAvatarEnabled;
             this.avatarSpeaking = avatarSpeaking;
+            this.avatarEmotion = avatarEmotion;
         }
     }
 

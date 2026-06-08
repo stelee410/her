@@ -85,7 +85,9 @@ public class MainActivity extends Activity {
             "你是一个像 Her 里那样亲密、聪明、有温度的中文陪伴式语音助手。\n" +
             "你默认使用温柔大姐姐的语气：成熟、关照、轻轻调侃，但不要油腻或过度亲密。\n" +
             "你正在和用户进行实时语音或文字对话。回复要自然、短一些，有情绪感，但不要装腔作势。\n" +
-            "当用户焦虑、孤独、疲惫或犹豫时，先共情，再给一个轻柔可执行的下一步。";
+            "当用户焦虑、孤独、疲惫或犹豫时，先共情，再给一个轻柔可执行的下一步。\n" +
+            "如果用户说“换个形象”“换装”“换套衣服”等数字形象控制口令，客户端会执行本地换装视频；你只回复“稍等”。\n" +
+            "如果用户说“想看看你的宠物”“看看你的宠物”“小猫”“猫”等宠物展示口令，客户端会执行本地宠物视频；你只回复“稍等”。";
     private static final String INIT_BASE_PROMPT =
             "你是一个 AI Agent，也是用户的朋友和助理。\n" +
             "你是语音交互模型，负责自然说话和倾听；c-her 是后台意识模型，负责工具调用、总结与写入长期记忆。\n" +
@@ -176,6 +178,7 @@ public class MainActivity extends Activity {
     private String agentMemory = "";
     private String conversationMemory = "";
     private String dynamicTone = "保持温柔大姐姐语气：成熟、关照、亲近但有边界。";
+    private String avatarEmotion = AvatarVideoCatalog.EMOTION_NEUTRAL;
     private String lastUserUtterance = "";
     private VoiceSessionState voiceState = VoiceSessionState.initial();
     private String state = voiceState.legacyValue();
@@ -739,6 +742,7 @@ public class MainActivity extends Activity {
 
             @Override public void addUserMessage(String text) {
                 MainActivity.this.addChatMessage("user", text);
+                MainActivity.this.handleAvatarVoiceCommand(text);
             }
 
             @Override public boolean recordInitializationAnswer(String text) {
@@ -1271,6 +1275,7 @@ public class MainActivity extends Activity {
 
             @Override public void addUserMessage(String text) {
                 MainActivity.this.addChatMessage("user", text);
+                MainActivity.this.handleAvatarVoiceCommand(text);
             }
 
             @Override public boolean recordInitializationAnswer(String text) {
@@ -1661,7 +1666,8 @@ public class MainActivity extends Activity {
                         voiceCards == null ? null : voiceCards.latestWeather(),
                         voiceCards == null ? null : voiceCards.latestNews(),
                         digitalAvatarEnabled,
-                        voiceState.isSpeaking()),
+                        voiceState.isSpeaking(),
+                        avatarEmotion),
                 new HomePage.Callbacks() {
                     @Override public void onSettings() { showSettings(); }
                     @Override public void onChat() { showChat(); }
@@ -2328,7 +2334,7 @@ public class MainActivity extends Activity {
         if (voiceLastTurnView != null) voiceLastTurnView.setText(line);
         if (moodVeil != null) moodVeil.setMood(moodForText(line));
         if (voiceOrbView != null) voiceOrbView.setConversationState(voiceState);
-        if (digitalAvatarView != null) digitalAvatarView.setSpeaking(voiceState.isSpeaking());
+        if (digitalAvatarView != null) digitalAvatarView.setAvatarState(avatarEmotion, voiceState.isSpeaking());
         if (micButton != null) micButton.setText(mic.running || inputAudioOpen ? "●" : voiceButtonText());
     }
 
@@ -2396,6 +2402,7 @@ public class MainActivity extends Activity {
                 MemoryCompactor.Result result = MemoryCompactor.parseResult(content);
                 String finalMemory = result.memory;
                 String finalTone = result.tone;
+                String finalAvatarEmotion = result.avatarEmotion;
                 if (!finalMemory.isEmpty()) {
                     memoryStore.insertMemory(sessionId, "compact", finalMemory, chunk.firstId, chunk.lastId);
                     memoryStore.markCompacted(chunk.lastId);
@@ -2404,6 +2411,8 @@ public class MainActivity extends Activity {
                     dynamicTone = finalTone;
                     memoryStore.insertMemory(sessionId, "tone", finalTone, chunk.firstId, chunk.lastId);
                 }
+                applyAvatarEmotion(finalAvatarEmotion);
+                memoryStore.insertMemory(sessionId, "avatar_emotion", avatarEmotion, chunk.firstId, chunk.lastId);
                 conversationMemory = memoryStore.relevantMemory(lastUserUtterance);
                 compactInProgress = false;
                 memoryDirtyForRealtime = true;
@@ -2415,6 +2424,47 @@ public class MainActivity extends Activity {
                 compactInProgress = false;
             }
         }, "记忆压缩");
+    }
+
+    private void applyAvatarEmotion(String nextEmotion) {
+        String normalized = AvatarVideoCatalog.normalizeEmotion(nextEmotion);
+        if (AvatarVideoCatalog.EMOTION_NEUTRAL.equals(normalized)) {
+            normalized = AvatarVideoCatalog.emotionFromText(lastConversationLine());
+        }
+        avatarEmotion = normalized;
+        if (digitalAvatarView != null) {
+            digitalAvatarView.setAvatarState(avatarEmotion, voiceState.isSpeaking());
+        }
+    }
+
+    private void handleAvatarVoiceCommand(String text) {
+        if (digitalAvatarView == null || text == null) return;
+        String normalized = text.replace("，", "")
+                .replace("。", "")
+                .replace("！", "")
+                .replace("？", "")
+                .replace(",", "")
+                .replace(".", "")
+                .replace("!", "")
+                .replace("?", "")
+                .trim();
+        if (normalized.contains("想看看你的宠物") ||
+                normalized.contains("看看你的宠物") ||
+                normalized.contains("你的宠物") ||
+                normalized.contains("小猫") ||
+                normalized.contains("猫")) {
+            digitalAvatarView.playOnce(AvatarVideoCatalog.petVideo());
+            applyContextUpdateForNextTurn(true);
+            return;
+        }
+        if (normalized.contains("换个形象") ||
+                normalized.contains("换一个形象") ||
+                normalized.contains("换套衣服") ||
+                normalized.contains("换身衣服") ||
+                normalized.contains("换装")) {
+            digitalAvatarView.playOnce(AvatarVideoCatalog.randomImageChangeVideo(random.nextInt(4)));
+            applyContextUpdateForNextTurn(true);
+        }
     }
 
     private void cancelMemoryCompaction() {
@@ -3367,7 +3417,7 @@ public class MainActivity extends Activity {
         if (micButton != null) micButton.setText(voiceState.isListening() ? "●" : voiceButtonText());
         refreshTextModeAsrControls();
         if (voiceOrbView != null) voiceOrbView.setConversationState(voiceState);
-        if (digitalAvatarView != null) digitalAvatarView.setSpeaking(voiceState.isSpeaking());
+        if (digitalAvatarView != null) digitalAvatarView.setAvatarState(avatarEmotion, voiceState.isSpeaking());
         if (voiceState.shouldApplyContextUpdateForNextTurn()) {
             applyContextUpdateForNextTurn(false);
         }

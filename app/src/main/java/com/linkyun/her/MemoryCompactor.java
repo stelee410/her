@@ -19,7 +19,8 @@ final class MemoryCompactor {
                 "你是长期记忆压缩器。根据近期对话生成两类内容：\n" +
                 "1. memory_md：稳定、可检索、可长期保存的事实/偏好/关系/目标/边界。\n" +
                 "2. tone_guidance：下一阶段 Agent 应如何调整说话语气，必须短而具体。\n" +
-                "只输出 JSON：{\"memory_md\":\"...\",\"tone_guidance\":\"...\"}");
+                "3. avatar_emotion：根据这段对话当前情绪选择一个值，只能是 neutral、happy、unhappy、playful、sports。\n" +
+                "只输出 JSON：{\"memory_md\":\"...\",\"tone_guidance\":\"...\",\"avatar_emotion\":\"neutral\"}");
         messages.put(system);
 
         JSONObject user = new JSONObject();
@@ -41,14 +42,15 @@ final class MemoryCompactor {
 
     static Result parseResult(String content) {
         String value = content == null ? "" : content.trim();
-        if (value.isEmpty()) return new Result("", "");
+        if (value.isEmpty()) return new Result("", "", AvatarVideoCatalog.EMOTION_NEUTRAL);
         try {
             JSONObject compact = parseJsonObject(value);
             return new Result(
                     compact.optString("memory_md", value).trim(),
-                    compact.optString("tone_guidance", "").trim());
+                    compact.optString("tone_guidance", "").trim(),
+                    AvatarVideoCatalog.normalizeEmotion(compact.optString("avatar_emotion", "")));
         } catch (JSONException error) {
-            return new Result(value, "");
+            return new Result(value, "", AvatarVideoCatalog.EMOTION_NEUTRAL);
         }
     }
 
@@ -72,10 +74,12 @@ final class MemoryCompactor {
     static final class Result {
         final String memory;
         final String tone;
+        final String avatarEmotion;
 
-        Result(String memory, String tone) {
+        Result(String memory, String tone, String avatarEmotion) {
             this.memory = memory;
             this.tone = tone;
+            this.avatarEmotion = avatarEmotion;
         }
     }
 }
