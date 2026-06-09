@@ -11,6 +11,13 @@ val localProperties = Properties().apply {
     }
 }
 
+val syncFullscreenAvatarAssets by tasks.registering(org.gradle.api.tasks.Copy::class) {
+    from(rootProject.layout.projectDirectory.dir("assets")) {
+        include("standby.mp4", "talking.mp4")
+    }
+    into(layout.buildDirectory.dir("generated/fullscreen-avatar-assets"))
+}
+
 android {
     namespace = "com.linkyun.her"
     compileSdk = 35
@@ -41,6 +48,16 @@ android {
     buildFeatures {
         buildConfig = true
     }
+
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(layout.buildDirectory.dir("generated/fullscreen-avatar-assets"))
+        }
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(syncFullscreenAvatarAssets)
 }
 
 dependencies {

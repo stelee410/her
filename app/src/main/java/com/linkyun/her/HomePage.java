@@ -52,7 +52,7 @@ final class HomePage {
         root.addView(voiceEntry, entryParams);
 
         top.bringToFront();
-        return new Views(root, rootState.moodVeil, null, null, null, null, null, null, homeTimeView, handwrittenNameView);
+        return new Views(root, rootState.moodVeil, null, null, null, null, null, null, null, homeTimeView, handwrittenNameView);
     }
 
     static Views renderVoice(MainActivity activity, HerUi ui, VoiceModel model, Callbacks callbacks) {
@@ -60,6 +60,8 @@ final class HomePage {
         FrameLayout root = rootState.frame;
         LinearLayout top = ui.topBar("☰", "", "Aa", callbacks::onSettings, callbacks::onChat);
         root.addView(top);
+        boolean assetsFullscreen = model.digitalAvatarEnabled &&
+                AvatarPlaybackMode.isAssetsFullscreen(model.avatarPlaybackMode);
 
         LinearLayout center = new LinearLayout(activity);
         center.setOrientation(LinearLayout.VERTICAL);
@@ -70,30 +72,41 @@ final class HomePage {
 
         VoiceOrbView voiceOrbView = null;
         DigitalAvatarView digitalAvatarView = null;
+        AssetVideoAvatarView assetVideoAvatarView = null;
         if (model.digitalAvatarEnabled) {
-            digitalAvatarView = new DigitalAvatarView(activity);
-            digitalAvatarView.setAvatarState(model.avatarEmotion, model.avatarSpeaking);
-            FrameLayout.LayoutParams avatarParams = ui.frame(ui.dp(600), ui.dp(800), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-            root.addView(digitalAvatarView, avatarParams);
+            if (assetsFullscreen) {
+                assetVideoAvatarView = new AssetVideoAvatarView(activity);
+                assetVideoAvatarView.setSpeaking(model.avatarSpeaking);
+                root.addView(assetVideoAvatarView, ui.frame(-1, -1));
+            } else {
+                digitalAvatarView = new DigitalAvatarView(activity);
+                digitalAvatarView.setAvatarState(model.avatarEmotion, model.avatarSpeaking);
+                FrameLayout.LayoutParams avatarParams = ui.frame(ui.dp(600), ui.dp(800), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                root.addView(digitalAvatarView, avatarParams);
+            }
         } else {
             voiceOrbView = new VoiceOrbView(activity);
             voiceOrbView.setOnClickListener(v -> callbacks.onToggleMic());
             center.addView(voiceOrbView, new LinearLayout.LayoutParams(ui.dp(178), ui.dp(178)));
         }
 
-        TextView voiceLastTurnView = ui.text(model.lastLine, 22, Color.WHITE, 0);
-        voiceLastTurnView.setGravity(Gravity.CENTER);
-        voiceLastTurnView.setLineSpacing(ui.dp(4), 1.0f);
-        voiceLastTurnView.setPadding(ui.dp(8), ui.dp(34), ui.dp(8), 0);
-        LinearLayout.LayoutParams lastParams = new LinearLayout.LayoutParams(-1, -2);
-        lastParams.topMargin = ui.dp(6);
-        center.addView(voiceLastTurnView, lastParams);
+        TextView voiceLastTurnView = null;
+        TextView stateLabel = null;
+        if (!assetsFullscreen) {
+            voiceLastTurnView = ui.text(model.lastLine, 22, Color.WHITE, 0);
+            voiceLastTurnView.setGravity(Gravity.CENTER);
+            voiceLastTurnView.setLineSpacing(ui.dp(4), 1.0f);
+            voiceLastTurnView.setPadding(ui.dp(8), ui.dp(34), ui.dp(8), 0);
+            LinearLayout.LayoutParams lastParams = new LinearLayout.LayoutParams(-1, -2);
+            lastParams.topMargin = ui.dp(6);
+            center.addView(voiceLastTurnView, lastParams);
 
-        TextView stateLabel = ui.text(model.stateLabel, 12, 0xA8FFE0E0, 0);
-        stateLabel.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams stateParams = new LinearLayout.LayoutParams(-1, -2);
-        stateParams.topMargin = ui.dp(16);
-        center.addView(stateLabel, stateParams);
+            stateLabel = ui.text(model.stateLabel, 12, 0xA8FFE0E0, 0);
+            stateLabel.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams stateParams = new LinearLayout.LayoutParams(-1, -2);
+            stateParams.topMargin = ui.dp(16);
+            center.addView(stateLabel, stateParams);
+        }
 
         AudioLevelView audioLevelView = null;
         TextView micButton = null;
@@ -131,7 +144,8 @@ final class HomePage {
         if (audioLevelView != null) audioLevelView.bringToFront();
         if (micButton != null) micButton.bringToFront();
         top.bringToFront();
-        return new Views(root, rootState.moodVeil, voiceOrbView, digitalAvatarView, voiceLastTurnView, stateLabel, audioLevelView, micButton, null, null);
+        return new Views(root, rootState.moodVeil, voiceOrbView, digitalAvatarView, assetVideoAvatarView,
+                voiceLastTurnView, stateLabel, audioLevelView, micButton, null, null);
     }
 
     interface Callbacks {
@@ -160,17 +174,19 @@ final class HomePage {
         final WeatherTool.WeatherResult weather;
         final NewsTool.NewsResult news;
         final boolean digitalAvatarEnabled;
+        final String avatarPlaybackMode;
         final boolean avatarSpeaking;
         final String avatarEmotion;
 
         VoiceModel(String lastLine, String stateLabel, int mood, WeatherTool.WeatherResult weather, NewsTool.NewsResult news,
-                boolean digitalAvatarEnabled, boolean avatarSpeaking, String avatarEmotion) {
+                boolean digitalAvatarEnabled, String avatarPlaybackMode, boolean avatarSpeaking, String avatarEmotion) {
             this.lastLine = lastLine;
             this.stateLabel = stateLabel;
             this.mood = mood;
             this.weather = weather;
             this.news = news;
             this.digitalAvatarEnabled = digitalAvatarEnabled;
+            this.avatarPlaybackMode = AvatarPlaybackMode.normalize(avatarPlaybackMode);
             this.avatarSpeaking = avatarSpeaking;
             this.avatarEmotion = avatarEmotion;
         }
@@ -181,6 +197,7 @@ final class HomePage {
         final MoodVeil moodVeil;
         final VoiceOrbView voiceOrbView;
         final DigitalAvatarView digitalAvatarView;
+        final AssetVideoAvatarView assetVideoAvatarView;
         final TextView voiceLastTurnView;
         final TextView stateLabel;
         final AudioLevelView audioLevelView;
@@ -188,13 +205,15 @@ final class HomePage {
         final TextView homeTimeView;
         final TextView handwrittenNameView;
 
-        Views(FrameLayout root, MoodVeil moodVeil, VoiceOrbView voiceOrbView, DigitalAvatarView digitalAvatarView, TextView voiceLastTurnView,
+        Views(FrameLayout root, MoodVeil moodVeil, VoiceOrbView voiceOrbView, DigitalAvatarView digitalAvatarView,
+                AssetVideoAvatarView assetVideoAvatarView, TextView voiceLastTurnView,
                 TextView stateLabel, AudioLevelView audioLevelView, TextView micButton,
                 TextView homeTimeView, TextView handwrittenNameView) {
             this.root = root;
             this.moodVeil = moodVeil;
             this.voiceOrbView = voiceOrbView;
             this.digitalAvatarView = digitalAvatarView;
+            this.assetVideoAvatarView = assetVideoAvatarView;
             this.voiceLastTurnView = voiceLastTurnView;
             this.stateLabel = stateLabel;
             this.audioLevelView = audioLevelView;
