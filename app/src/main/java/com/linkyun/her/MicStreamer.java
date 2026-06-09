@@ -1,6 +1,7 @@
 package com.linkyun.her;
 
 import android.annotation.SuppressLint;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
@@ -20,7 +21,7 @@ final class MicStreamer {
 
     interface RecorderFactory {
         int minBufferSize();
-        Recorder create(int bufferSize);
+        Recorder create(int bufferSize, AudioDeviceInfo preferredDevice);
         void enableEffects(int sessionId);
         void releaseEffects();
     }
@@ -40,11 +41,15 @@ final class MicStreamer {
     }
 
     boolean start(AudioSink sink) {
+        return start(null, sink);
+    }
+
+    boolean start(AudioDeviceInfo preferredDevice, AudioSink sink) {
         if (running) return true;
         try {
             int min = recorderFactory.minBufferSize();
             int bufferSize = Math.max(min, 16000);
-            recorder = recorderFactory.create(bufferSize);
+            recorder = recorderFactory.create(bufferSize, preferredDevice);
         } catch (IllegalArgumentException | SecurityException error) {
             recorder = null;
             return false;
@@ -116,13 +121,19 @@ final class MicStreamer {
         }
 
         @SuppressLint("MissingPermission")
-        @Override public Recorder create(int bufferSize) {
-            return new AndroidRecorder(new AudioRecord(
+        @Override public Recorder create(int bufferSize, AudioDeviceInfo preferredDevice) {
+            AudioRecord audioRecord = new AudioRecord(
                     MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                     16000,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize));
+                    bufferSize);
+            if (preferredDevice != null) {
+                try {
+                    audioRecord.setPreferredDevice(preferredDevice);
+                } catch (RuntimeException ignored) { }
+            }
+            return new AndroidRecorder(audioRecord);
         }
 
         @Override public void enableEffects(int sessionId) {

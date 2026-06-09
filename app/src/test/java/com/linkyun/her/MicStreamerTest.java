@@ -5,6 +5,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import android.media.AudioDeviceInfo;
+
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -116,7 +118,7 @@ public final class MicStreamerTest {
             return -2;
         }
 
-        @Override public MicStreamer.Recorder create(int bufferSize) {
+        @Override public MicStreamer.Recorder create(int bufferSize, AudioDeviceInfo preferredDevice) {
             if (throwOnCreate) throw new IllegalArgumentException("bad recorder");
             this.bufferSize = bufferSize;
             return recorder;

@@ -9,13 +9,22 @@ final class PcmPlayer {
     private final String tag;
     private AudioTrack track;
     private int sampleRate = 24000;
+    private boolean voiceCommunication;
 
     PcmPlayer(String tag) {
         this.tag = tag;
     }
 
     synchronized void begin(int rate) {
+        begin(rate, false);
+    }
+
+    synchronized void begin(int rate, boolean useVoiceCommunication) {
         sampleRate = rate;
+        if (voiceCommunication != useVoiceCommunication) {
+            stop();
+        }
+        voiceCommunication = useVoiceCommunication;
         Log.d(tag, "player begin sampleRate=" + sampleRate);
         ensureTrack();
     }
@@ -41,7 +50,9 @@ final class PcmPlayer {
         Log.d(tag, "create AudioTrack min=" + min + " rate=" + sampleRate);
         track = new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setUsage(voiceCommunication
+                                ? AudioAttributes.USAGE_VOICE_COMMUNICATION
+                                : AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build())
                 .setAudioFormat(new AudioFormat.Builder()

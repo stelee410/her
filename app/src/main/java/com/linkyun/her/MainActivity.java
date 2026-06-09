@@ -10,6 +10,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.location.Location;
 import android.location.LocationManager;
+import android.media.AudioDeviceInfo;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Build;
@@ -57,6 +58,7 @@ public class MainActivity extends Activity {
     private static final int REQ_AUDIO = 71;
     private static final int REQ_NOTIFY = 72;
     private static final int REQ_LOCATION = 73;
+    private static final int REQ_BLUETOOTH_CONNECT = 74;
     private static final boolean HALF_DUPLEX = true;
     private static final boolean CONTINUOUS_CONVERSATION = true;
     private static final int INIT_TARGET_USER_TURNS = 3;
@@ -143,6 +145,7 @@ public class MainActivity extends Activity {
     private final PcmPlayer player = new PcmPlayer(TAG);
     private GatewayTtsPlayer ttsPlayer;
     private HeadsetBindingManager headsets;
+    private VoiceAudioRouteManager voiceAudioRoute;
     private HeadsetController headsetController;
     private MemoryStore memoryStore;
     private MemoryCoordinator memoryCoordinator;
@@ -202,6 +205,7 @@ public class MainActivity extends Activity {
     private boolean textModeAsrStarting = false;
     private boolean textModeAsrRecording = false;
     private boolean pendingTextModeAsrAfterPermission = false;
+    private boolean pendingVoiceInputAfterBluetoothPermission = false;
     private boolean textModeAsrTaskReady = false;
     private boolean textModeAsrFinishAfterStart = false;
     private boolean textModeAsrTouchActive = false;
@@ -295,6 +299,7 @@ public class MainActivity extends Activity {
         SharedPreferences prefs = getSharedPreferences("her", MODE_PRIVATE);
         headsets = new HeadsetBindingManager(this, prefs, this::onHeadsetDevicesChanged);
         headsets.start();
+        voiceAudioRoute = new VoiceAudioRouteManager(this);
         demoMode = prefs.getBoolean(PREF_DEMO_MODE, false);
         digitalAvatarEnabled = prefs.getBoolean(PREF_DIGITAL_AVATAR_ENABLED, false);
         digitalAvatarPlaybackMode = AvatarPlaybackMode.normalize(
@@ -634,7 +639,7 @@ public class MainActivity extends Activity {
             }
 
             @Override public void stopMic() {
-                mic.stop();
+                stopMicCapture();
             }
 
             @Override public void markInputAudioClosed() {
@@ -1400,7 +1405,7 @@ public class MainActivity extends Activity {
         releaseReplyWakeLock();
         releaseHeadsetMediaSession();
         if (headsets != null) headsets.stop();
-        mic.stop();
+        stopMicCapture();
         player.stop();
         if (shutdown.stopToolTtsPlayback) stopToolTtsPlayback(false);
         else stopOpeningTts();
@@ -1583,6 +1588,18 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
         super.onRequestPermissionsResult(requestCode, permissions, grants);
+        if (requestCode == REQ_BLUETOOTH_CONNECT) {
+            boolean granted = grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED;
+            if (pendingVoiceInputAfterBluetoothPermission) {
+                pendingVoiceInputAfterBluetoothPermission = false;
+                if (granted) {
+                    requestVoiceInputStart(false, null, false);
+                } else {
+                    toastError("需要蓝牙权限才能使用耳机麦克风。");
+                }
+            }
+            return;
+        }
         PermissionResultDecision decision = PermissionResultDecision.decide(
                 requestCode, grants, REQ_AUDIO, REQ_LOCATION, PackageManager.PERMISSION_GRANTED);
         if (decision.action == PermissionResultDecision.Action.RECORD_GRANTED) {
@@ -1786,7 +1803,7 @@ public class MainActivity extends Activity {
 
     private void resetInitialization() {
         cancelMemoryCompaction();
-        mic.stop();
+        stopMicCapture();
         player.stop();
         realtime.close();
         stopToolTtsPlayback(false);
@@ -2194,7 +2211,7 @@ public class MainActivity extends Activity {
 
     private void clearCurrentSession() {
         cancelMemoryCompaction();
-        mic.stop();
+        stopMicCapture();
         player.stop();
         realtime.close();
         stopToolTtsPlayback(false);
@@ -2896,7 +2913,7 @@ public class MainActivity extends Activity {
         textModeAsrDiscardResult = false;
         clearTextModeAsrAudioBuffer();
         startHerForegroundService(true);
-        boolean started = mic.start(this::onTextModeAsrAudio);
+        boolean started = startMicCapture(this::onTextModeAsrAudio);
         if (!started) {
             startHerForegroundService(false);
             resetTextModeAsrState(false);
@@ -2949,7 +2966,7 @@ public class MainActivity extends Activity {
 
     private void finishTextModeAsrCapture() {
         if (textModeAsrRecording) {
-            mic.stop();
+            stopMicCapture();
             startHerForegroundService(false);
         }
         textModeAsrRecording = false;
@@ -2964,7 +2981,7 @@ public class MainActivity extends Activity {
     private void onTextModeAsrFinalText(String text) {
         boolean discard = textModeAsrDiscardResult;
         if (textModeAsrRecording) {
-            mic.stop();
+            stopMicCapture();
             startHerForegroundService(false);
         }
         resetTextModeAsrState(false);
@@ -2982,7 +2999,7 @@ public class MainActivity extends Activity {
 
     private void onTextModeAsrError(String message) {
         if (textModeAsrRecording) {
-            mic.stop();
+            stopMicCapture();
             startHerForegroundService(false);
         }
         resetTextModeAsrState(false);
@@ -2994,7 +3011,7 @@ public class MainActivity extends Activity {
     private void onTextModeAsrClosed() {
         if (!textModeAsrStarting && !textModeAsrRecording) return;
         if (textModeAsrRecording) {
-            mic.stop();
+            stopMicCapture();
             startHerForegroundService(false);
         }
         resetTextModeAsrState(false);
@@ -3005,7 +3022,7 @@ public class MainActivity extends Activity {
     private void cancelTextModeAsr() {
         pendingTextModeAsrAfterPermission = false;
         if (textModeAsrRecording) {
-            mic.stop();
+            stopMicCapture();
             startHerForegroundService(false);
         }
         resetTextModeAsrState(true);
@@ -3123,6 +3140,11 @@ public class MainActivity extends Activity {
                 voiceState.isTextOnly(), mic.running, inputAudioOpen, hasRecordPermission)) {
             return;
         }
+        if (needsBluetoothConnectPermissionForVoiceRoute()) {
+            pendingVoiceInputAfterBluetoothPermission = true;
+            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, REQ_BLUETOOTH_CONNECT);
+            return;
+        }
         cancelScheduledContinuousListening();
         markConversationInteraction(false);
         resetRealtimeOutput();
@@ -3132,7 +3154,7 @@ public class MainActivity extends Activity {
         startHerForegroundService(true);
         realtime.sendEvent("input_audio.start", null);
         inputAudioOpen = true;
-        boolean started = mic.start(bytes -> {
+        boolean started = startMicCapture(bytes -> {
             if (inputAudioOpen && realtime.isOpen()) {
                 realtime.sendAudio(bytes);
                 processVad(bytes);
@@ -3147,8 +3169,37 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void stopInputAudio(String nextState) {
+    private boolean startMicCapture(AudioSink sink) {
+        AudioDeviceInfo preferredInput = voiceAudioRoute == null ? null : voiceAudioRoute.begin(headsets);
+        boolean started = mic.start(preferredInput, sink);
+        if (!started && voiceAudioRoute != null) voiceAudioRoute.end();
+        return started;
+    }
+
+    private void stopMicCapture() {
+        stopMicCapture(false);
+    }
+
+    private void stopMicCapture(boolean keepAudioRoute) {
         mic.stop();
+        if (!keepAudioRoute) releaseVoiceAudioRoute();
+    }
+
+    private void releaseVoiceAudioRoute() {
+        if (voiceAudioRoute != null) voiceAudioRoute.end();
+    }
+
+    private boolean isVoiceAudioRouteActive() {
+        return voiceAudioRoute != null && voiceAudioRoute.isActive();
+    }
+
+    private boolean needsBluetoothConnectPermissionForVoiceRoute() {
+        return voiceAudioRoute != null && voiceAudioRoute.needsBluetoothPermission(headsets);
+    }
+
+    private void stopInputAudio(String nextState) {
+        boolean keepAudioRoute = "processing".equals(nextState) || "speaking".equals(nextState);
+        stopMicCapture(keepAudioRoute);
         if (audioLevelView != null) audioLevelView.setLevel(0);
         if (voiceOrbView != null) voiceOrbView.setLevel(0);
         VoiceInputAudioDecision.StopDecision decision =
@@ -3177,6 +3228,7 @@ public class MainActivity extends Activity {
                     isTextModeActive());
             if (decision == null) return;
             Log.d(TAG, "asr final timeout, resume listening");
+            releaseVoiceAudioRoute();
             setState("ready");
             if (decision.resumeListening) scheduleContinuousListening(80);
         };
@@ -3223,7 +3275,7 @@ public class MainActivity extends Activity {
             setState("speaking");
         }
         if (sampleRate > 0) {
-            player.begin(sampleRate);
+            player.begin(sampleRate, isVoiceAudioRouteActive());
         }
     }
 
@@ -3835,18 +3887,22 @@ public class MainActivity extends Activity {
     }
 
     private void handleRealtimeOutputFinished(boolean stopped) {
+        releaseVoiceAudioRoute();
         if (voiceSession != null) voiceSession.onRealtimeOutputFinished(stopped);
     }
 
     private void handleRealtimeClosed() {
+        releaseVoiceAudioRoute();
         if (realtimeClosedHandler != null) realtimeClosedHandler.onClosed();
     }
 
     private void retryRealtime(String reason) {
+        releaseVoiceAudioRoute();
         if (realtimeRecovery != null) realtimeRecovery.retry(reason);
     }
 
     private void handleRealtimeTransportError(String message) {
+        releaseVoiceAudioRoute();
         if (realtimeRecovery != null) realtimeRecovery.onTransportError(message);
     }
 
