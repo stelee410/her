@@ -20,13 +20,18 @@ public final class ErrorDisplayDecisionTest {
     }
 
     @Test
-    public void appendsMessageWhenChatOrVoiceSurfaceCanShowIt() {
+    public void appendsMessageWhenChatCanShowIt() {
         ErrorDisplayDecision chat = ErrorDisplayDecision.decide("错误", false, true, false);
-        ErrorDisplayDecision voice = ErrorDisplayDecision.decide("错误", false, false, true);
 
         assertTrue(chat.appendAssistantMessage);
         assertTrue(chat.renderMessages);
-        assertTrue(voice.appendAssistantMessage);
+    }
+
+    @Test
+    public void doesNotPersistVoiceSurfaceErrorsAsConversation() {
+        ErrorDisplayDecision voice = ErrorDisplayDecision.decide("错误", false, false, true);
+
+        assertFalse(voice.appendAssistantMessage);
         assertFalse(voice.renderMessages);
     }
 

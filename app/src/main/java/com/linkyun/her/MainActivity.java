@@ -27,6 +27,8 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.animation.AccelerateDecelerateInterpolator;
 import android.widget.EditText;
@@ -68,6 +70,10 @@ public class MainActivity extends Activity {
     private static final long CHAT_ACTIVE_UNLOCK_MS = 60_000;
     private static final long RESPONSE_PENDING_VISIBLE_TIMEOUT_MS = 10_000;
     private static final long ASR_FINAL_TIMEOUT_MS = 2_800;
+    private static final long VOICE_SILENCE_TEXT_MODE_TIMEOUT_MS = 60_000;
+    private static final long STARTUP_PLAYBACK_GAIN_WINDOW_MS = 20_000;
+    private static final float INIT_OPENING_TTS_GAIN = 0.45f;
+    private static final float STARTUP_REALTIME_PLAYBACK_GAIN = 0.55f;
     private static final int TEXT_ASR_SLIDE_THRESHOLD_DP = 82;
     private static final int TEXT_ASR_PREBUFFER_MAX_BYTES = 96_000;
     private static final String USER_MEMORY_FILE = "user.md";
@@ -143,9 +149,11 @@ public class MainActivity extends Activity {
             .build();
     private final MicStreamer mic = new MicStreamer();
     private final PcmPlayer player = new PcmPlayer(TAG);
+    private final VoiceAudioAdapter speakerVoiceAudioAdapter = new SpeakerVoiceAudioAdapter();
     private GatewayTtsPlayer ttsPlayer;
     private HeadsetBindingManager headsets;
     private VoiceAudioRouteManager voiceAudioRoute;
+    private VoiceAudioAdapter activeVoiceAudioAdapter;
     private HeadsetController headsetController;
     private MemoryStore memoryStore;
     private MemoryCoordinator memoryCoordinator;
@@ -202,6 +210,7 @@ public class MainActivity extends Activity {
     private boolean compactInProgress = false;
     private boolean memoryDirtyForRealtime = false;
     private boolean inputAudioOpen = false;
+    private boolean voiceBargeInInterrupted = false;
     private boolean textModeAsrStarting = false;
     private boolean textModeAsrRecording = false;
     private boolean pendingTextModeAsrAfterPermission = false;
@@ -247,6 +256,8 @@ public class MainActivity extends Activity {
     private Runnable conversationLockTimeout;
     private Runnable responsePendingTimeout;
     private Runnable asrFinalTimeout;
+    private Runnable voiceSilenceTextModeTimeout;
+    private Runnable realtimeOutputFinishDrain;
     private Runnable textModeAsrPulse;
     private Runnable textReplyPlaceholderTicker;
     private boolean conversationOverLockscreen = false;
@@ -254,6 +265,7 @@ public class MainActivity extends Activity {
     private ValueAnimator replyBrightnessAnimator;
     private float replyOriginalBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
     private long summaryStartedAt = 0;
+    private long appStartedAt = 0;
     private final Object textModeAsrAudioLock = new Object();
     private final List<byte[]> textModeAsrBufferedAudio = new ArrayList<>();
     private int textModeAsrBufferedBytes = 0;
@@ -261,10 +273,15 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle bundle) {
         super.onCreate(bundle);
+        appStartedAt = SystemClock.uptimeMillis();
         Window window = getWindow();
         window.setStatusBarColor(Color.TRANSPARENT);
-        window.setNavigationBarColor(Color.rgb(66, 29, 48));
-        if (Build.VERSION.SDK_INT >= 30) window.setDecorFitsSystemWindows(false);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= 29) {
+            window.setStatusBarContrastEnforced(false);
+            window.setNavigationBarContrastEnforced(false);
+        }
+        enterFullscreenMode();
         startHerForegroundService(false);
         requestNotificationPermissionIfNeeded();
 
@@ -330,6 +347,47 @@ public class MainActivity extends Activity {
         }
         loadVoices();
         handleVoiceCommandIntent(getIntent());
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        enterFullscreenMode();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) enterFullscreenMode();
+    }
+
+    @Override
+    public void setContentView(View view) {
+        super.setContentView(view);
+        enterFullscreenMode();
+    }
+
+    private void enterFullscreenMode() {
+        Window window = getWindow();
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        window.clearFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
+        View decor = window.getDecorView();
+        decor.setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        }
     }
 
     private VoiceInputCoordinator createVoiceInputCoordinator() {
@@ -1216,6 +1274,10 @@ public class MainActivity extends Activity {
             @Override public void connectRealtime() {
                 realtime.connect();
             }
+
+            @Override public void wakeVoiceFromHeadsetLongPress() {
+                MainActivity.this.wakeVoiceFromHeadsetLongPress();
+            }
         });
     }
 
@@ -1399,6 +1461,8 @@ public class MainActivity extends Activity {
         if (conversationLockTimeout != null) main.removeCallbacks(conversationLockTimeout);
         if (responsePendingTimeout != null) main.removeCallbacks(responsePendingTimeout);
         if (asrFinalTimeout != null) main.removeCallbacks(asrFinalTimeout);
+        cancelVoiceSilenceTextModeTimeout();
+        cancelRealtimeOutputFinishDrain();
         stopTextReplyPlaceholderTicker();
         clearConversationOverLockscreen();
         restoreReplyScreenBrightness();
@@ -1567,6 +1631,19 @@ public class MainActivity extends Activity {
 
     private void handleHeadsetTransportClick() {
         if (headsetController != null) headsetController.onTransportClick(SystemClock.uptimeMillis());
+    }
+
+    private void wakeVoiceFromHeadsetLongPress() {
+        main.post(() -> {
+            markConversationInteraction(true);
+            resetVoiceSilenceTextModeTimeout();
+            if (!voiceInputSurfaceActive || isTextModeActive()) {
+                openVoiceSurface();
+            }
+            if (voiceInputSurfaceActive) {
+                requestVoiceInputStart(true, "headset_long_press", true);
+            }
+        });
     }
 
     private HeadsetController.MediaButton mapHeadsetMediaButton(int keyCode) {
@@ -1921,7 +1998,7 @@ public class MainActivity extends Activity {
 
     private void speakOpeningWithGatewayTts(String text) {
         if (text == null || text.trim().isEmpty()) return;
-        ttsPlayer.play("init-opening", text, new GatewayTtsPlayer.Listener() {
+        ttsPlayer.play("init-opening", text, INIT_OPENING_TTS_GAIN, new GatewayTtsPlayer.Listener() {
             @Override public void onStarted(String id, String spokenText) {
                 if (!InitializationOpening.shouldHandleTtsCallback(
                         initializing, isTextModeActive(), voiceInputSurfaceActive)) return;
@@ -2033,6 +2110,7 @@ public class MainActivity extends Activity {
 
     private void enterTextMode() {
         voiceInputSurfaceActive = false;
+        cancelVoiceSilenceTextModeTimeout();
         TextModeEntryCleanupDecision cleanup = TextModeEntryCleanupDecision.enterTextMode();
         if (cleanup.resetRealtimeRetries && realtimeRecovery != null) {
             realtimeRecovery.resetRetryCount();
@@ -2059,6 +2137,7 @@ public class MainActivity extends Activity {
 
     private void leaveVoiceSurface() {
         voiceInputSurfaceActive = false;
+        cancelVoiceSilenceTextModeTimeout();
         VoiceSurfaceExitCleanupDecision cleanup =
                 VoiceSurfaceExitCleanupDecision.leaveVoiceSurface(mic.running || inputAudioOpen);
         if (cleanup.cancelVoiceInputRequests) clearVoiceInputRequests();
@@ -2773,6 +2852,7 @@ public class MainActivity extends Activity {
     }
 
     private void interruptRealtimePlayback(String reason, boolean discardUntilDone) {
+        cancelRealtimeOutputFinishDrain();
         if (voicePipeline != null) voicePipeline.markRealtimeOutputInterrupted(discardUntilDone);
         player.stop();
         if (realtime.isOpen()) {
@@ -3181,9 +3261,11 @@ public class MainActivity extends Activity {
     }
 
     private boolean startMicCapture(AudioSink sink) {
-        AudioDeviceInfo preferredInput = voiceAudioRoute == null ? null : voiceAudioRoute.begin(headsets);
+        VoiceAudioAdapter adapter = selectVoiceAudioAdapter();
+        activeVoiceAudioAdapter = adapter;
+        AudioDeviceInfo preferredInput = adapter.beginInput();
         boolean started = mic.start(preferredInput, sink);
-        if (!started && voiceAudioRoute != null) voiceAudioRoute.end();
+        if (!started) releaseVoiceAudioRoute();
         return started;
     }
 
@@ -3197,15 +3279,54 @@ public class MainActivity extends Activity {
     }
 
     private void releaseVoiceAudioRoute() {
-        if (voiceAudioRoute != null) voiceAudioRoute.end();
+        if (activeVoiceAudioAdapter != null) {
+            activeVoiceAudioAdapter.end();
+            activeVoiceAudioAdapter = null;
+        } else if (voiceAudioRoute != null && voiceAudioRoute.isActive()) {
+            voiceAudioRoute.end();
+        }
+    }
+
+    private void releaseVoiceAudioRouteAfterOutput() {
+        VoiceAudioAdapter adapter = currentVoiceAudioAdapter();
+        if (adapter.keepRouteBetweenTurns() && voiceInputSurfaceActive && realtime.isOpen()) return;
+        releaseVoiceAudioRoute();
     }
 
     private boolean isVoiceAudioRouteActive() {
-        return voiceAudioRoute != null && voiceAudioRoute.isActive();
+        return currentVoiceAudioAdapter().isActive();
     }
 
     private boolean needsBluetoothConnectPermissionForVoiceRoute() {
-        return voiceAudioRoute != null && voiceAudioRoute.needsBluetoothPermission(headsets);
+        return selectVoiceAudioAdapter().needsPermission();
+    }
+
+    private VoiceAudioAdapter currentVoiceAudioAdapter() {
+        return activeVoiceAudioAdapter == null ? speakerVoiceAudioAdapter : activeVoiceAudioAdapter;
+    }
+
+    private VoiceAudioAdapter selectVoiceAudioAdapter() {
+        if (shouldUseBluetoothHfpAudio()) {
+            return new BluetoothHfpVoiceAudioAdapter(voiceAudioRoute, headsets, demoMode);
+        }
+        return speakerVoiceAudioAdapter;
+    }
+
+    private VoiceAudioAdapter ensureOutputAudioAdapter() {
+        VoiceAudioAdapter adapter = currentVoiceAudioAdapter();
+        if (adapter.supportsBargeIn() != shouldUseBluetoothHfpAudio()) {
+            adapter.end();
+            adapter = selectVoiceAudioAdapter();
+        }
+        activeVoiceAudioAdapter = adapter;
+        adapter.beginOutput();
+        return adapter;
+    }
+
+    private boolean shouldUseBluetoothHfpAudio() {
+        if (headsets == null || voiceAudioRoute == null) return false;
+        if (demoMode) return headsets.hasBluetoothHeadset(true);
+        return headsets.isBoundConnected() && headsets.isBoundBluetoothHeadset();
     }
 
     private void stopInputAudio(String nextState) {
@@ -3255,6 +3376,7 @@ public class MainActivity extends Activity {
 
     private void resetVad() {
         voiceActivityDetector.reset();
+        voiceBargeInInterrupted = false;
     }
 
     private void processVad(byte[] bytes) {
@@ -3265,6 +3387,17 @@ public class MainActivity extends Activity {
                 VoiceOrbView orbView = voiceOrbView;
                 if (levelView != null) levelView.setLevel(result.visualLevel);
                 if (orbView != null) orbView.setLevel(result.visualLevel);
+            });
+        }
+        if (result.speech) {
+            main.post(() -> {
+                if (inputAudioOpen && mic.running && voiceState.isSpeaking()
+                        && currentVoiceAudioAdapter().supportsBargeIn()
+                        && !voiceBargeInInterrupted) {
+                    voiceBargeInInterrupted = true;
+                    interruptRealtimePlayback("voice_barge_in", true);
+                    setState("listening");
+                }
             });
         }
         if (result.shouldEndInput) {
@@ -3280,13 +3413,47 @@ public class MainActivity extends Activity {
         cancelScheduledContinuousListening();
         markInitializationOpeningDeliveredFromRealtime();
         breatheScreenForAssistantReply();
-        if (HALF_DUPLEX && (mic.running || inputAudioOpen)) {
+        VoiceAudioAdapter adapter = ensureOutputAudioAdapter();
+        if (adapter.supportsBargeIn()) {
+            resetVad();
+            if (!mic.running && !inputAudioOpen) startBargeInInput(adapter);
+            setState("speaking");
+        } else if (HALF_DUPLEX && (mic.running || inputAudioOpen)) {
             stopInputAudio("speaking");
         } else {
             setState("speaking");
         }
         if (sampleRate > 0) {
-            player.begin(sampleRate, isVoiceAudioRouteActive());
+            player.setVolumeGain(currentRealtimePlaybackGain());
+            player.begin(sampleRate, adapter.useVoiceCommunicationPlayback() && adapter.isActive());
+        }
+    }
+
+    private float currentRealtimePlaybackGain() {
+        long elapsed = SystemClock.uptimeMillis() - appStartedAt;
+        return elapsed >= 0 && elapsed < STARTUP_PLAYBACK_GAIN_WINDOW_MS
+                ? STARTUP_REALTIME_PLAYBACK_GAIN
+                : 1.0f;
+    }
+
+    private void startBargeInInput(VoiceAudioAdapter adapter) {
+        if (!adapter.supportsBargeIn()) return;
+        if (!realtime.isOpen()) return;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
+        startHerForegroundService(true);
+        realtime.sendEvent("input_audio.start", null);
+        inputAudioOpen = true;
+        AudioDeviceInfo preferredInput = adapter.beginInput();
+        boolean started = mic.start(preferredInput, bytes -> {
+            if (inputAudioOpen && realtime.isOpen()) {
+                realtime.sendAudio(bytes);
+                processVad(bytes);
+            }
+        });
+        if (!started) {
+            realtime.sendEvent("input_audio.end", null);
+            inputAudioOpen = false;
+            startHerForegroundService(false);
         }
     }
 
@@ -3300,6 +3467,57 @@ public class MainActivity extends Activity {
 
     private void cancelScheduledContinuousListening() {
         if (voiceInput != null) voiceInput.cancelContinuousListening();
+    }
+
+    private void updateVoiceSilenceTextModeTimeout() {
+        if (!shouldMonitorVoiceSilence()) {
+            cancelVoiceSilenceTextModeTimeout();
+            return;
+        }
+        ensureVoiceSilenceTextModeTimeout();
+    }
+
+    private void resetVoiceSilenceTextModeTimeout() {
+        cancelVoiceSilenceTextModeTimeout();
+        if (shouldMonitorVoiceSilence()) ensureVoiceSilenceTextModeTimeout();
+    }
+
+    private void ensureVoiceSilenceTextModeTimeout() {
+        if (voiceSilenceTextModeTimeout != null) return;
+        voiceSilenceTextModeTimeout = () -> {
+            voiceSilenceTextModeTimeout = null;
+            if (shouldMonitorVoiceSilence()) hangUpVoiceForSilence();
+        };
+        main.postDelayed(voiceSilenceTextModeTimeout, VOICE_SILENCE_TEXT_MODE_TIMEOUT_MS);
+    }
+
+    private void cancelVoiceSilenceTextModeTimeout() {
+        if (voiceSilenceTextModeTimeout == null) return;
+        main.removeCallbacks(voiceSilenceTextModeTimeout);
+        voiceSilenceTextModeTimeout = null;
+    }
+
+    private boolean shouldMonitorVoiceSilence() {
+        return VoiceSilenceTextModeDecision.shouldMonitor(
+                initialized,
+                voiceInputSurfaceActive,
+                isTextModeActive(),
+                summaryInProgress,
+                hasActiveToolTtsPlayback(),
+                ttsPlayer != null && ttsPlayer.isPlaying(),
+                isWeatherInteractionActive(),
+                isNewsInteractionActive(),
+                voiceState);
+    }
+
+    private void hangUpVoiceForSilence() {
+        Log.d(TAG, "voice silence timeout, switch to text mode");
+        cancelScheduledContinuousListening();
+        cancelAsrFinalTimeout();
+        persistActiveAssistantMessage();
+        assistantAccumulator.clearActive();
+        showChat();
+        realtime.close();
     }
 
     private void onRealtimeReady() {
@@ -3507,6 +3725,7 @@ public class MainActivity extends Activity {
         if (voiceState.shouldApplyContextUpdateForNextTurn()) {
             applyContextUpdateForNextTurn(false);
         }
+        updateVoiceSilenceTextModeTimeout();
     }
 
     private void updateInteractionKeepScreenOn() {
@@ -3588,6 +3807,14 @@ public class MainActivity extends Activity {
 
     private void onHeadsetDevicesChanged() {
         if (headsetController != null) headsetController.onHeadsetDevicesChanged(isBoundHeadsetConnected());
+        if (activeVoiceAudioAdapter != null && activeVoiceAudioAdapter.supportsBargeIn()
+                && !shouldUseBluetoothHfpAudio()) {
+            if (mic.running || inputAudioOpen) {
+                stopInputAudio("ready");
+            } else {
+                releaseVoiceAudioRoute();
+            }
+        }
     }
 
     private void refreshHeadsetDependentControls() {
@@ -3835,6 +4062,7 @@ public class MainActivity extends Activity {
     }
 
     private void handleEvent(String type, JSONObject payload) {
+        if (isRecognizedUserSpeechEvent(type, payload)) resetVoiceSilenceTextModeTimeout();
         switch (RealtimeEventType.classify(type, payload != null)) {
         case SESSION_CREATED:
             realtime.markSessionCreated();
@@ -3865,6 +4093,7 @@ public class MainActivity extends Activity {
             onAssistantDelta(RealtimeEventPayload.assistantTextDelta(payload));
             break;
         case OUTPUT_AUDIO_START:
+            cancelRealtimeOutputFinishDrain();
             RealtimeOutputStartDecision outputStart =
                     RealtimeOutputStartDecision.decide(isTextModeActive());
             if (outputStart.startRealtimeOutput && voicePipeline != null) {
@@ -3874,9 +4103,10 @@ public class MainActivity extends Activity {
             break;
         case OUTPUT_AUDIO_DONE:
             if (voicePipeline != null) voicePipeline.onRealtimeOutputDone();
-            handleRealtimeOutputFinished(false);
+            scheduleRealtimeOutputFinishedAfterDrain();
             break;
         case OUTPUT_AUDIO_STOP:
+            cancelRealtimeOutputFinishDrain();
             if (voicePipeline != null) voicePipeline.onRealtimeOutputStopped();
             handleRealtimeOutputFinished(true);
             break;
@@ -3897,22 +4127,47 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean isRecognizedUserSpeechEvent(String type, JSONObject payload) {
+        if (!"asr.partial".equals(type) && !"asr.final".equals(type)) return false;
+        return RealtimeEventPayload.asrFinalText(payload).trim().length() > 0;
+    }
+
     private void handleRealtimeOutputFinished(boolean stopped) {
-        releaseVoiceAudioRoute();
+        cancelRealtimeOutputFinishDrain();
+        releaseVoiceAudioRouteAfterOutput();
         if (voiceSession != null) voiceSession.onRealtimeOutputFinished(stopped);
     }
 
+    private void scheduleRealtimeOutputFinishedAfterDrain() {
+        cancelRealtimeOutputFinishDrain();
+        long delayMs = player.playbackDrainDelayMs();
+        realtimeOutputFinishDrain = () -> {
+            realtimeOutputFinishDrain = null;
+            handleRealtimeOutputFinished(false);
+        };
+        main.postDelayed(realtimeOutputFinishDrain, delayMs);
+    }
+
+    private void cancelRealtimeOutputFinishDrain() {
+        if (realtimeOutputFinishDrain == null) return;
+        main.removeCallbacks(realtimeOutputFinishDrain);
+        realtimeOutputFinishDrain = null;
+    }
+
     private void handleRealtimeClosed() {
+        cancelRealtimeOutputFinishDrain();
         releaseVoiceAudioRoute();
         if (realtimeClosedHandler != null) realtimeClosedHandler.onClosed();
     }
 
     private void retryRealtime(String reason) {
+        cancelRealtimeOutputFinishDrain();
         releaseVoiceAudioRoute();
         if (realtimeRecovery != null) realtimeRecovery.retry(reason);
     }
 
     private void handleRealtimeTransportError(String message) {
+        cancelRealtimeOutputFinishDrain();
         releaseVoiceAudioRoute();
         if (realtimeRecovery != null) realtimeRecovery.onTransportError(message);
     }

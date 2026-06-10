@@ -69,6 +69,10 @@ final class GatewayTtsPlayer {
     }
 
     void play(String id, String text, Listener listener) {
+        play(id, text, 1.0f, listener);
+    }
+
+    void play(String id, String text, float volumeGain, Listener listener) {
         stop();
         if (text == null || text.trim().isEmpty()) return;
         int run = callbackGate.nextRun();
@@ -77,10 +81,11 @@ final class GatewayTtsPlayer {
             postError(run, listener, id, "Missing AGENTLLM_API_KEY");
             return;
         }
-        requestSpeech(run, id, text, PCM_FORMAT, listener);
+        requestSpeech(run, id, text, PCM_FORMAT, clampGain(volumeGain), listener);
     }
 
-    private void requestSpeech(int run, String id, String text, String responseFormat, Listener listener) {
+    private void requestSpeech(int run, String id, String text, String responseFormat,
+            float volumeGain, Listener listener) {
         if (!isCurrent(run)) return;
         JSONObject body = new JSONObject();
         try {
@@ -120,7 +125,7 @@ final class GatewayTtsPlayer {
                     String nextFormat = nextFallbackFormat(responseFormat);
                     if (nextFormat != null) {
                         clearCallIfOwned(requestCall);
-                        requestSpeech(run, id, text, nextFormat, listener);
+                        requestSpeech(run, id, text, nextFormat, volumeGain, listener);
                     } else {
                         clearCallIfOwned(requestCall);
                         postError(run, listener, id, "HTTP " + response.code() + " " + responseText);
@@ -128,9 +133,9 @@ final class GatewayTtsPlayer {
                     return;
                 }
                 if (PCM_FORMAT.equals(responseFormat)) {
-                    streamPcmResponse(run, id, text, requestCall, response, listener);
+                    streamPcmResponse(run, id, text, volumeGain, requestCall, response, listener);
                 } else {
-                    playFileResponse(run, id, text, responseFormat, requestCall, response, listener);
+                    playFileResponse(run, id, text, responseFormat, volumeGain, requestCall, response, listener);
                 }
             }
         });
@@ -155,7 +160,7 @@ final class GatewayTtsPlayer {
         stopPlayer();
     }
 
-    private void streamPcmResponse(int run, String id, String text, Call requestCall,
+    private void streamPcmResponse(int run, String id, String text, float volumeGain, Call requestCall,
             Response response, Listener listener) throws IOException {
         if (response.body() == null) {
             clearCallIfOwned(requestCall);
@@ -168,6 +173,7 @@ final class GatewayTtsPlayer {
         long startedAtMs = 0;
         try (Response ignored = response; InputStream in = response.body().byteStream()) {
             track = createStreamTrack();
+            track.setVolume(volumeGain);
             if (!isCurrent(run)) {
                 return;
             }
@@ -254,7 +260,7 @@ final class GatewayTtsPlayer {
     }
 
     private void playFileResponse(int run, String id, String text, String responseFormat,
-            Call requestCall, Response response, Listener listener) throws IOException {
+            float volumeGain, Call requestCall, Response response, Listener listener) throws IOException {
         byte[] audioBytes;
         try (Response ignored = response) {
             audioBytes = response.body() == null ? new byte[0] : response.body().bytes();
@@ -272,7 +278,7 @@ final class GatewayTtsPlayer {
             out.write(audioBytes);
         }
         clearCallIfOwned(requestCall);
-        main.post(() -> playFile(run, id, text, responseFormat, file, listener));
+        main.post(() -> playFile(run, id, text, responseFormat, volumeGain, file, listener));
     }
 
     private String fileExtension(String responseFormat) {
@@ -280,7 +286,8 @@ final class GatewayTtsPlayer {
         return "mp3";
     }
 
-    private void playFile(int run, String id, String text, String responseFormat, File file, Listener listener) {
+    private void playFile(int run, String id, String text, String responseFormat,
+            float volumeGain, File file, Listener listener) {
         if (!isCurrent(run)) return;
         stopPlayer();
         MediaPlayer mediaPlayer = null;
@@ -289,6 +296,7 @@ final class GatewayTtsPlayer {
             MediaPlayer ownedPlayer = mediaPlayer;
             player = ownedPlayer;
             ownedPlayer.setDataSource(file.getAbsolutePath());
+            ownedPlayer.setVolume(volumeGain, volumeGain);
             ownedPlayer.setOnCompletionListener(mp -> {
                 if (!isCurrent(run)) return;
                 Log.d(tag, "gateway tts playback completed id=" + id);
@@ -301,7 +309,7 @@ final class GatewayTtsPlayer {
                 stopPlayerIfOwned(ownedPlayer);
                 String nextFormat = nextFallbackFormat(responseFormat);
                 if (nextFormat != null) {
-                    requestSpeech(run, id, text, nextFormat, listener);
+                    requestSpeech(run, id, text, nextFormat, volumeGain, listener);
                 } else {
                     listener.onError(id, "playback error");
                 }
@@ -322,11 +330,16 @@ final class GatewayTtsPlayer {
             if (!isCurrent(run)) return;
             String nextFormat = nextFallbackFormat(responseFormat);
             if (nextFormat != null) {
-                requestSpeech(run, id, text, nextFormat, listener);
+                requestSpeech(run, id, text, nextFormat, volumeGain, listener);
             } else {
                 listener.onError(id, error.getMessage());
             }
         }
+    }
+
+    private static float clampGain(float gain) {
+        if (Float.isNaN(gain)) return 1.0f;
+        return Math.max(0.0f, Math.min(1.0f, gain));
     }
 
     private void postStarted(int run, Listener listener, String id, String text) {

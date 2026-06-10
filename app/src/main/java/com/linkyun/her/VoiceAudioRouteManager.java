@@ -21,19 +21,23 @@ final class VoiceAudioRouteManager {
     }
 
     AudioDeviceInfo begin(HeadsetBindingManager headsets) {
+        return begin(headsets, false);
+    }
+
+    AudioDeviceInfo begin(HeadsetBindingManager headsets, boolean allowAnyConnectedBluetooth) {
         if (audioManager == null || headsets == null) return null;
-        if (active) return headsets.boundVoiceInputDevice();
-        AudioDeviceInfo input = headsets.boundVoiceInputDevice();
-        if (input == null && !headsets.isBoundBluetoothHeadset()) return null;
+        if (active) return headsets.voiceInputDevice(allowAnyConnectedBluetooth);
+        AudioDeviceInfo input = headsets.voiceInputDevice(allowAnyConnectedBluetooth);
+        if (input == null && !headsets.hasBluetoothHeadset(allowAnyConnectedBluetooth)) return null;
         previousMode = audioManager.getMode();
         previousScoOn = audioManager.isBluetoothScoOn();
         active = true;
         try {
             audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
         } catch (RuntimeException ignored) { }
-        if (headsets.isBoundBluetoothHeadset()) {
-            routeBluetooth(headsets);
-            input = headsets.boundVoiceInputDevice();
+        if (headsets.hasBluetoothHeadset(allowAnyConnectedBluetooth)) {
+            routeBluetooth(headsets, allowAnyConnectedBluetooth);
+            input = headsets.voiceInputDevice(allowAnyConnectedBluetooth);
         }
         return input;
     }
@@ -65,17 +69,26 @@ final class VoiceAudioRouteManager {
     }
 
     boolean needsBluetoothPermission(HeadsetBindingManager headsets) {
+        return needsBluetoothPermission(headsets, false);
+    }
+
+    boolean needsBluetoothPermission(HeadsetBindingManager headsets, boolean allowAnyConnectedBluetooth) {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                 && headsets != null
-                && headsets.isBoundBluetoothHeadset()
+                && headsets.hasBluetoothHeadset(allowAnyConnectedBluetooth)
                 && context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
                         != PackageManager.PERMISSION_GRANTED;
     }
 
     private void routeBluetooth(HeadsetBindingManager headsets) {
-        if (needsBluetoothPermission(headsets)) return;
+        routeBluetooth(headsets, false);
+    }
+
+    private void routeBluetooth(HeadsetBindingManager headsets, boolean allowAnyConnectedBluetooth) {
+        if (needsBluetoothPermission(headsets, allowAnyConnectedBluetooth)) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            AudioDeviceInfo communicationDevice = headsets.boundBluetoothCommunicationDevice();
+            AudioDeviceInfo communicationDevice =
+                    headsets.bluetoothCommunicationDevice(allowAnyConnectedBluetooth);
             if (communicationDevice != null) {
                 try {
                     audioManager.setCommunicationDevice(communicationDevice);

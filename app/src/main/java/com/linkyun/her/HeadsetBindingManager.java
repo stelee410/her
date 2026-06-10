@@ -77,11 +77,16 @@ final class HeadsetBindingManager {
     }
 
     boolean isBoundBluetoothHeadset() {
+        return hasBluetoothHeadset(false);
+    }
+
+    boolean hasBluetoothHeadset(boolean allowAnyConnected) {
         String key = boundKey();
-        if (key.isEmpty()) return false;
         for (Device device : connectedHeadsets()) {
+            if (allowAnyConnected && isBluetoothCommunication(device.type)) return true;
             if (key.equals(device.key) && isBluetooth(device.type)) return true;
         }
+        if (key.isEmpty()) return false;
         String label = normalizedLabel(boundLabel());
         if (label.isEmpty()) return false;
         for (Device device : connectedHeadsets()) {
@@ -91,12 +96,17 @@ final class HeadsetBindingManager {
     }
 
     AudioDeviceInfo boundVoiceInputDevice() {
+        return voiceInputDevice(false);
+    }
+
+    AudioDeviceInfo voiceInputDevice(boolean allowAnyConnected) {
         String key = boundKey();
         String label = normalizedLabel(boundLabel());
         AudioDeviceInfo fallback = null;
         for (AudioDeviceInfo info : inputDevices()) {
             if (!isVoiceInput(info.getType())) continue;
             Device device = Device.from(info);
+            if (allowAnyConnected && isBluetoothCommunication(info.getType())) return info;
             if (key.equals(device.key)) return info;
             if (!label.isEmpty() && label.equals(normalizedLabel(device.label))) fallback = info;
         }
@@ -104,12 +114,17 @@ final class HeadsetBindingManager {
     }
 
     AudioDeviceInfo boundBluetoothCommunicationDevice() {
+        return bluetoothCommunicationDevice(false);
+    }
+
+    AudioDeviceInfo bluetoothCommunicationDevice(boolean allowAnyConnected) {
         String key = boundKey();
         String label = normalizedLabel(boundLabel());
         AudioDeviceInfo fallback = null;
         for (AudioDeviceInfo info : allDevices()) {
             if (!isBluetoothCommunication(info.getType())) continue;
             Device device = Device.from(info);
+            if (allowAnyConnected) return info;
             if (key.equals(device.key)) return info;
             if (!label.isEmpty() && label.equals(normalizedLabel(device.label))) fallback = info;
         }

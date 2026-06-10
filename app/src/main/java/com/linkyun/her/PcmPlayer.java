@@ -10,6 +10,8 @@ final class PcmPlayer {
     private AudioTrack track;
     private int sampleRate = 24000;
     private boolean voiceCommunication;
+    private long framesWritten;
+    private float volumeGain = 1.0f;
 
     PcmPlayer(String tag) {
         this.tag = tag;
@@ -20,19 +22,37 @@ final class PcmPlayer {
     }
 
     synchronized void begin(int rate, boolean useVoiceCommunication) {
+        stop();
         sampleRate = rate;
-        if (voiceCommunication != useVoiceCommunication) {
-            stop();
-        }
         voiceCommunication = useVoiceCommunication;
+        framesWritten = 0;
         Log.d(tag, "player begin sampleRate=" + sampleRate);
         ensureTrack();
     }
 
     synchronized void play(byte[] bytes) {
         ensureTrack();
+        track.setVolume(volumeGain);
         int written = track.write(bytes, 0, bytes.length);
+        if (written > 0) framesWritten += written / 2;
         Log.d(tag, "player write bytes=" + bytes.length + " written=" + written + " state=" + track.getPlayState());
+    }
+
+    synchronized void setVolumeGain(float gain) {
+        volumeGain = clampGain(gain);
+        if (track != null) track.setVolume(volumeGain);
+    }
+
+    synchronized long playbackDrainDelayMs() {
+        if (track == null || sampleRate <= 0) return 0;
+        try {
+            long played = track.getPlaybackHeadPosition() & 0xffffffffL;
+            long pendingFrames = Math.max(0, framesWritten - played);
+            long pendingMs = (pendingFrames * 1000L) / sampleRate;
+            return Math.max(500, Math.min(1600, pendingMs + 260));
+        } catch (RuntimeException ignored) {
+            return 650;
+        }
     }
 
     synchronized void stop() {
@@ -41,6 +61,7 @@ final class PcmPlayer {
             try { track.flush(); } catch (Exception ignored) { }
             track.release();
             track = null;
+            framesWritten = 0;
         }
     }
 
@@ -64,6 +85,12 @@ final class PcmPlayer {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build();
         track.play();
+        track.setVolume(volumeGain);
         Log.d(tag, "AudioTrack playState=" + track.getPlayState());
+    }
+
+    private static float clampGain(float gain) {
+        if (Float.isNaN(gain)) return 1.0f;
+        return Math.max(0.0f, Math.min(1.0f, gain));
     }
 }

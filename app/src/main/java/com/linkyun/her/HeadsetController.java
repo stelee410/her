@@ -26,18 +26,30 @@ final class HeadsetController {
         void toast(String message);
         void refreshVoiceControls();
         void connectRealtime();
+        void wakeVoiceFromHeadsetLongPress();
     }
 
     private final Host host;
     private boolean hasPendingClick;
     private long lastClickAt;
+    private boolean longPressHandled;
 
     HeadsetController(Host host) {
         this.host = host;
     }
 
     boolean onMediaButton(MediaButton button, boolean actionDown, int repeatCount, long nowMs) {
-        if (!actionDown || repeatCount > 0) return false;
+        if (!actionDown) {
+            if (isClickButton(button)) longPressHandled = false;
+            return false;
+        }
+        if (repeatCount > 0) {
+            if (!isClickButton(button) || longPressHandled) return false;
+            longPressHandled = true;
+            clearPendingClick();
+            host.wakeVoiceFromHeadsetLongPress();
+            return true;
+        }
         if (button == MediaButton.NEXT) {
             interruptCurrentConversation();
             return true;

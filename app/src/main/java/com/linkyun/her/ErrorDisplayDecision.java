@@ -26,7 +26,7 @@ final class ErrorDisplayDecision {
         return new ErrorDisplayDecision(
                 message == null ? "" : message,
                 hasInitializationLastTurn,
-                hasMessageList || hasVoiceLastTurn,
+                hasMessageList,
                 hasMessageList,
                 true);
     }

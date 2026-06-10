@@ -11,14 +11,29 @@ import org.junit.Test;
 
 public final class HeadsetControllerTest {
     @Test
-    public void ignoresNonDownAndRepeatedMediaButtonEvents() {
+    public void ignoresNonDownAndRepeatedNonClickMediaButtonEvents() {
         Host host = new Host();
         HeadsetController controller = new HeadsetController(host);
 
         assertFalse(controller.onMediaButton(HeadsetController.MediaButton.PLAY_PAUSE, false, 0, 1000));
-        assertFalse(controller.onMediaButton(HeadsetController.MediaButton.PLAY_PAUSE, true, 1, 1000));
+        assertFalse(controller.onMediaButton(HeadsetController.MediaButton.NEXT, true, 1, 1000));
 
         assertEquals(0, host.events.size());
+    }
+
+    @Test
+    public void longPressWakesVoiceOnceUntilReleased() {
+        Host host = new Host();
+        HeadsetController controller = new HeadsetController(host);
+
+        assertTrue(controller.onMediaButton(HeadsetController.MediaButton.HOOK, true, 1, 1000));
+        assertFalse(controller.onMediaButton(HeadsetController.MediaButton.HOOK, true, 2, 1100));
+        assertFalse(controller.onMediaButton(HeadsetController.MediaButton.HOOK, false, 0, 1200));
+        assertTrue(controller.onMediaButton(HeadsetController.MediaButton.HOOK, true, 1, 1300));
+
+        assertEquals("wakeVoice", host.events.get(0));
+        assertEquals("wakeVoice", host.events.get(1));
+        assertEquals(2, host.events.size());
     }
 
     @Test
@@ -192,5 +207,6 @@ public final class HeadsetControllerTest {
         @Override public void toast(String message) { events.add("toast:" + message); }
         @Override public void refreshVoiceControls() { events.add("refresh"); }
         @Override public void connectRealtime() { events.add("connectRealtime"); }
+        @Override public void wakeVoiceFromHeadsetLongPress() { events.add("wakeVoice"); }
     }
 }

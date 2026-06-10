@@ -8,11 +8,13 @@ final class VoiceActivityDetector {
     static final class Result {
         final int level;
         final int visualLevel;
+        final boolean speech;
         final boolean shouldEndInput;
 
-        Result(int level, int visualLevel, boolean shouldEndInput) {
+        Result(int level, int visualLevel, boolean speech, boolean shouldEndInput) {
             this.level = level;
             this.visualLevel = visualLevel;
+            this.speech = speech;
             this.shouldEndInput = shouldEndInput;
         }
     }
@@ -35,7 +37,7 @@ final class VoiceActivityDetector {
         if (speech) {
             speechStarted = true;
             silenceFrames = 0;
-            return new Result(level, visualLevel, false);
+            return new Result(level, visualLevel, true, false);
         }
         if (speechStarted) {
             silenceFrames++;
@@ -43,7 +45,7 @@ final class VoiceActivityDetector {
         boolean shouldEndInput = speechStarted
                 && frames > MIN_FRAMES_BEFORE_END
                 && silenceFrames >= SILENCE_FRAMES_TO_END;
-        return new Result(level, visualLevel, shouldEndInput);
+        return new Result(level, visualLevel, false, shouldEndInput);
     }
 
     static int averageAbsPcm16(byte[] bytes) {

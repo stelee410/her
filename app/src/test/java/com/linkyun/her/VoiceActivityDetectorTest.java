@@ -22,6 +22,7 @@ public final class VoiceActivityDetectorTest {
 
         assertEquals(9000, result.level);
         assertEquals(100, result.visualLevel);
+        assertTrue(result.speech);
         assertFalse(result.shouldEndInput);
     }
 
@@ -35,6 +36,7 @@ public final class VoiceActivityDetectorTest {
         }
 
         assertFalse(result.shouldEndInput);
+        assertFalse(result.speech);
     }
 
     @Test
