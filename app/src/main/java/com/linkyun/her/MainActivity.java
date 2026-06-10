@@ -1688,7 +1688,7 @@ public class MainActivity extends Activity {
                         moodForText(lastConversationLine()),
                         voiceCards == null ? null : voiceCards.latestWeather(),
                         voiceCards == null ? null : voiceCards.latestNews(),
-                        digitalAvatarEnabled,
+                        digitalAvatarActive(),
                         digitalAvatarPlaybackMode,
                         voiceState.isSpeaking(),
                         avatarEmotion),
@@ -2143,10 +2143,12 @@ public class MainActivity extends Activity {
         list.addView(navRow("↺", "Reinitialize", "Reset memory", this::resetInitialization));
         list.addView(navRow("⌫", "Clear Session", "Keep memory", this::clearCurrentSession));
         list.addView(navRow("▣", "演示模式", demoMode ? "On · 本机麦克风与 Speaker" : "Off", this::showDemoModePrompt));
-        list.addView(navRow("◌", "Enable 数字形象", digitalAvatarEnabled ? "On · Voice chat" : "Off",
-                () -> setDigitalAvatarEnabled(!digitalAvatarEnabled)));
-        list.addView(navRow("▣", "数字形象视频源", AvatarPlaybackMode.settingsLabel(digitalAvatarPlaybackMode),
-                () -> setDigitalAvatarPlaybackMode(AvatarPlaybackMode.next(digitalAvatarPlaybackMode))));
+        if (digitalAvatarAvailable()) {
+            list.addView(navRow("◌", "Enable 数字形象", digitalAvatarEnabled ? "On · Voice chat" : "Off",
+                    () -> setDigitalAvatarEnabled(!digitalAvatarEnabled)));
+            list.addView(navRow("▣", "数字形象视频源", AvatarPlaybackMode.settingsLabel(digitalAvatarPlaybackMode),
+                    () -> setDigitalAvatarPlaybackMode(AvatarPlaybackMode.next(digitalAvatarPlaybackMode))));
+        }
         list.addView(ui.navRow(R.drawable.ic_headphones, "Headphones", headsetSettingsLabel(), () -> showHeadsetPrompt(false)));
         list.addView(navRow("≋", "Voice", selectedVoiceLabel, this::showVoices));
         list.addView(navRow("♬", "Sound", "76%", null));
@@ -2190,7 +2192,16 @@ public class MainActivity extends Activity {
         showSettings();
     }
 
+    private boolean digitalAvatarAvailable() {
+        return BuildConfig.DIGITAL_AVATAR_ENABLED;
+    }
+
+    private boolean digitalAvatarActive() {
+        return digitalAvatarAvailable() && digitalAvatarEnabled;
+    }
+
     private void setDigitalAvatarEnabled(boolean enabled) {
+        if (!digitalAvatarAvailable()) enabled = false;
         if (digitalAvatarEnabled == enabled) return;
         digitalAvatarEnabled = enabled;
         getSharedPreferences("her", MODE_PRIVATE).edit()

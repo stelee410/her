@@ -22,6 +22,8 @@ android {
     namespace = "com.linkyun.her"
     compileSdk = 35
 
+    flavorDimensions += "device"
+
     defaultConfig {
         applicationId = "com.linkyun.her"
         minSdk = 26
@@ -45,18 +47,31 @@ android {
         buildConfigField("String", "AGENTVOICE_CLONED_VOICE", "\"S_VCQjam1U1\"")
     }
 
+    productFlavors {
+        create("phone") {
+            dimension = "device"
+            buildConfigField("boolean", "DIGITAL_AVATAR_ENABLED", "false")
+        }
+        create("tablet") {
+            dimension = "device"
+            buildConfigField("boolean", "DIGITAL_AVATAR_ENABLED", "true")
+        }
+    }
+
     buildFeatures {
         buildConfig = true
     }
 
     sourceSets {
-        getByName("main") {
+        getByName("tablet") {
             assets.srcDir(layout.buildDirectory.dir("generated/fullscreen-avatar-assets"))
         }
     }
 }
 
-tasks.named("preBuild") {
+tasks.matching { task ->
+    task.name.startsWith("preTablet") && task.name.endsWith("Build")
+}.configureEach {
     dependsOn(syncFullscreenAvatarAssets)
 }
 
