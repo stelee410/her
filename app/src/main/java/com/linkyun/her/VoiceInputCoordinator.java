@@ -110,9 +110,19 @@ final class VoiceInputCoordinator {
     void resumeAfterToolTts(long delayMs) {
         if (!continuousConversation) return;
         scheduler.postDelayed(() -> {
-            if (!host.isVoiceSurfaceActive()) return;
-            if (host.isInputActive()) return;
-            if (host.hasActiveToolTtsPlayback()) return;
+            if (!host.isVoiceSurfaceActive()) {
+                host.logVoiceInput("resume after tool tts blocked: voice surface inactive");
+                return;
+            }
+            if (host.isInputActive()) {
+                host.logVoiceInput("resume after tool tts skipped: input active");
+                return;
+            }
+            if (host.hasActiveToolTtsPlayback()) {
+                host.logVoiceInput("resume after tool tts blocked: tool tts active");
+                return;
+            }
+            host.logVoiceInput("resume after tool tts request start");
             requestStart(false, null, false);
         }, delayMs);
     }
@@ -134,11 +144,23 @@ final class VoiceInputCoordinator {
         int seq = ++continuousSeq;
         scheduler.postDelayed(() -> {
             if (seq != continuousSeq) return;
-            if (host.isTextModeActive()) return;
-            if (!host.isVoiceSurfaceActive()) return;
-            if (host.hasActiveToolTtsPlayback()) return;
+            if (host.isTextModeActive()) {
+                host.logVoiceInput("continuous listening blocked: text mode");
+                return;
+            }
+            if (!host.isVoiceSurfaceActive()) {
+                host.logVoiceInput("continuous listening blocked: voice surface inactive");
+                return;
+            }
+            if (host.hasActiveToolTtsPlayback()) {
+                host.logVoiceInput("continuous listening blocked: tool tts active");
+                return;
+            }
             if (host.isReadyForContinuousListening() && !host.isInputActive()) {
+                host.logVoiceInput("continuous listening start");
                 startContinuousListening();
+            } else {
+                host.logVoiceInput("continuous listening blocked: not ready or input active");
             }
         }, delayMs);
     }

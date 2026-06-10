@@ -422,7 +422,7 @@ public class MainActivity extends Activity {
                     }
 
                     @Override public boolean isReadyForContinuousListening() {
-                        return voiceState.isReady();
+                        return voiceState.isReady() || voiceState.isListening();
                     }
 
                     @Override public boolean isVoiceSurfaceActive() {
@@ -496,12 +496,15 @@ public class MainActivity extends Activity {
                         if (mic.running || inputAudioOpen) stopInputAudio("speaking");
                         if (realtime.isOpen()) interruptRealtimePlayback("tool_tts_playback", true);
                         player.stop();
+                        ensureOutputAudioAdapter();
+                        refreshRealtimePlaybackVolumeGain();
                         setState("speaking");
                     }
 
                     @Override public void playToolTts(String id, String text, ToolTtsCoordinator.PlaybackListener listener) {
                         Log.d(TAG, "tool tts request id=" + id + " len=" + text.length());
-                        ttsPlayer.play(id, text, new GatewayTtsPlayer.Listener() {
+                        ttsPlayer.play(id, text, currentGatewayTtsPlaybackOptions(),
+                                new GatewayTtsPlayer.Listener() {
                             @Override public void onStarted(String startedId, String spokenText) {
                                 listener.onStarted(startedId, spokenText);
                             }
@@ -3471,6 +3474,16 @@ public class MainActivity extends Activity {
             lastLoggedRealtimePlaybackGain = gain;
             Log.d(TAG, "realtime playback track gain=" + gain);
         }
+    }
+
+    private GatewayTtsPlayer.PlaybackOptions currentGatewayTtsPlaybackOptions() {
+        VoiceAudioAdapter adapter = currentVoiceAudioAdapter();
+        if (adapter.useVoiceCommunicationPlayback() && adapter.isActive()) {
+            return GatewayTtsPlayer.PlaybackOptions.voiceCommunication(
+                    activeVoiceOutputDevice,
+                    currentVoiceCallTrackVolumeScale());
+        }
+        return GatewayTtsPlayer.PlaybackOptions.media(1.0f);
     }
 
     private float currentRealtimePlaybackGain() {
