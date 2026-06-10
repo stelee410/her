@@ -42,6 +42,11 @@ final class VoiceAudioRouteManager {
         return input;
     }
 
+    AudioDeviceInfo beginOutput(HeadsetBindingManager headsets, boolean allowAnyConnectedBluetooth) {
+        begin(headsets, allowAnyConnectedBluetooth);
+        return outputDevice(headsets, allowAnyConnectedBluetooth);
+    }
+
     void end() {
         if (audioManager == null || !active) return;
         active = false;
@@ -103,4 +108,13 @@ final class VoiceAudioRouteManager {
             audioManager.setBluetoothScoOn(true);
         } catch (RuntimeException ignored) { }
     }
+
+    private AudioDeviceInfo outputDevice(HeadsetBindingManager headsets,
+            boolean allowAnyConnectedBluetooth) {
+        if (headsets == null || needsBluetoothPermission(headsets, allowAnyConnectedBluetooth)) {
+            return null;
+        }
+        return headsets.bluetoothCommunicationDevice(allowAnyConnectedBluetooth);
+    }
+
 }

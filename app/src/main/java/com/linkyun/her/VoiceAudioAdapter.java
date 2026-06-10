@@ -6,7 +6,7 @@ interface VoiceAudioAdapter {
     String name();
     boolean needsPermission();
     AudioDeviceInfo beginInput();
-    void beginOutput();
+    AudioDeviceInfo beginOutput();
     boolean useVoiceCommunicationPlayback();
     boolean supportsBargeIn();
     boolean keepRouteBetweenTurns();

@@ -15,7 +15,8 @@ final class SpeakerVoiceAudioAdapter implements VoiceAudioAdapter {
         return null;
     }
 
-    @Override public void beginOutput() {
+    @Override public AudioDeviceInfo beginOutput() {
+        return null;
     }
 
     @Override public boolean useVoiceCommunicationPlayback() {

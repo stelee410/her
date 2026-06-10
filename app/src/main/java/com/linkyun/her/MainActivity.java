@@ -11,6 +11,7 @@ import android.graphics.Color;
 import android.location.Location;
 import android.location.LocationManager;
 import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Build;
@@ -71,9 +72,7 @@ public class MainActivity extends Activity {
     private static final long RESPONSE_PENDING_VISIBLE_TIMEOUT_MS = 10_000;
     private static final long ASR_FINAL_TIMEOUT_MS = 2_800;
     private static final long VOICE_SILENCE_TEXT_MODE_TIMEOUT_MS = 60_000;
-    private static final long STARTUP_PLAYBACK_GAIN_WINDOW_MS = 20_000;
     private static final float INIT_OPENING_TTS_GAIN = 0.45f;
-    private static final float STARTUP_REALTIME_PLAYBACK_GAIN = 0.55f;
     private static final int TEXT_ASR_SLIDE_THRESHOLD_DP = 82;
     private static final int TEXT_ASR_PREBUFFER_MAX_BYTES = 96_000;
     private static final String USER_MEMORY_FILE = "user.md";
@@ -130,6 +129,7 @@ public class MainActivity extends Activity {
         @Override public void onRealtimeAudio(byte[] bytes) {
             if (!RealtimeAudioPlaybackDecision.shouldPlay(
                     isTextModeActive(), voiceInputSurfaceActive, shouldDiscardRealtimeAudio())) return;
+            refreshRealtimePlaybackVolumeGain();
             player.play(bytes);
         }
 
@@ -154,6 +154,9 @@ public class MainActivity extends Activity {
     private HeadsetBindingManager headsets;
     private VoiceAudioRouteManager voiceAudioRoute;
     private VoiceAudioAdapter activeVoiceAudioAdapter;
+    private AudioDeviceInfo activeVoiceOutputDevice;
+    private float lastLoggedRealtimePlaybackGain = -1.0f;
+    private String lastLoggedRealtimePlaybackVolume = "";
     private HeadsetController headsetController;
     private MemoryStore memoryStore;
     private MemoryCoordinator memoryCoordinator;
@@ -1071,6 +1074,10 @@ public class MainActivity extends Activity {
 
             @Override public void startWeather(String question, boolean realtimeMode) {
                 if (toolInteractions != null) toolInteractions.startWeather(question, realtimeMode);
+            }
+
+            @Override public void adjustVoiceVolume(VolumeSkill.Direction direction) {
+                MainActivity.this.adjustVoiceVolume(direction);
             }
 
             @Override public void logToolRoute(String message) {
@@ -2628,6 +2635,31 @@ public class MainActivity extends Activity {
         return toolRouter != null && toolRouter.routeUserText(text, realtimeMode);
     }
 
+    private void adjustVoiceVolume(VolumeSkill.Direction direction) {
+        if (direction == null) return;
+        AudioManager audio = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audio == null) return;
+        try {
+            int stream = AudioManager.STREAM_VOICE_CALL;
+            int current = audio.getStreamVolume(stream);
+            int min = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? audio.getStreamMinVolume(stream)
+                    : 0;
+            int max = audio.getStreamMaxVolume(stream);
+            int next = direction == VolumeSkill.Direction.UP
+                    ? Math.min(max, current + 1)
+                    : Math.max(min, current - 1);
+            if (next != current) {
+                audio.setStreamVolume(stream, next, 0);
+            }
+            refreshRealtimePlaybackVolumeGain();
+            Log.d(TAG, "voice volume skill direction=" + direction
+                    + " from=" + current + " to=" + next + " max=" + max);
+        } catch (RuntimeException error) {
+            Log.d(TAG, "voice volume skill failed: " + error.getMessage());
+        }
+    }
+
     private void routeToolsInBackground(String text) {
         if (backgroundToolRoutes != null) backgroundToolRoutes.route(text);
     }
@@ -3282,8 +3314,10 @@ public class MainActivity extends Activity {
         if (activeVoiceAudioAdapter != null) {
             activeVoiceAudioAdapter.end();
             activeVoiceAudioAdapter = null;
+            activeVoiceOutputDevice = null;
         } else if (voiceAudioRoute != null && voiceAudioRoute.isActive()) {
             voiceAudioRoute.end();
+            activeVoiceOutputDevice = null;
         }
     }
 
@@ -3319,7 +3353,7 @@ public class MainActivity extends Activity {
             adapter = selectVoiceAudioAdapter();
         }
         activeVoiceAudioAdapter = adapter;
-        adapter.beginOutput();
+        activeVoiceOutputDevice = adapter.beginOutput();
         return adapter;
     }
 
@@ -3361,7 +3395,7 @@ public class MainActivity extends Activity {
             if (decision == null) return;
             Log.d(TAG, "asr final timeout, resume listening");
             releaseVoiceAudioRoute();
-            setState("ready");
+            setState(decision.resumeListening ? "listening" : "ready");
             if (decision.resumeListening) scheduleContinuousListening(80);
         };
         main.postDelayed(asrFinalTimeout, ASR_FINAL_TIMEOUT_MS);
@@ -3424,16 +3458,80 @@ public class MainActivity extends Activity {
             setState("speaking");
         }
         if (sampleRate > 0) {
-            player.setVolumeGain(currentRealtimePlaybackGain());
-            player.begin(sampleRate, adapter.useVoiceCommunicationPlayback() && adapter.isActive());
+            refreshRealtimePlaybackVolumeGain();
+            player.begin(sampleRate, adapter.useVoiceCommunicationPlayback() && adapter.isActive(),
+                    activeVoiceOutputDevice);
+        }
+    }
+
+    private void refreshRealtimePlaybackVolumeGain() {
+        float gain = currentRealtimePlaybackGain();
+        player.setVolumeGain(gain);
+        if (Math.abs(gain - lastLoggedRealtimePlaybackGain) >= 0.01f) {
+            lastLoggedRealtimePlaybackGain = gain;
+            Log.d(TAG, "realtime playback track gain=" + gain);
         }
     }
 
     private float currentRealtimePlaybackGain() {
-        long elapsed = SystemClock.uptimeMillis() - appStartedAt;
-        return elapsed >= 0 && elapsed < STARTUP_PLAYBACK_GAIN_WINDOW_MS
-                ? STARTUP_REALTIME_PLAYBACK_GAIN
-                : 1.0f;
+        VoiceAudioAdapter adapter = currentVoiceAudioAdapter();
+        if (!adapter.useVoiceCommunicationPlayback() || !adapter.isActive()) return 1.0f;
+        return currentVoiceCallTrackVolumeScale();
+    }
+
+    private float currentVoiceCallTrackVolumeScale() {
+        AudioManager audio = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audio == null) return 1.0f;
+        try {
+            int stream = AudioManager.STREAM_VOICE_CALL;
+            int current = audio.getStreamVolume(stream);
+            int min = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? audio.getStreamMinVolume(stream)
+                    : 0;
+            int max = audio.getStreamMaxVolume(stream);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                int deviceType = activeVoiceOutputDevice == null
+                        ? AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                        : activeVoiceOutputDevice.getType();
+                float db = audio.getStreamVolumeDb(stream, current, deviceType);
+                float scale = Float.isInfinite(db) && db < 0
+                        ? 0.0f
+                        : clampGain((float) Math.pow(10.0, db / 20.0));
+                if (scale >= 0.99f && current < max) {
+                    scale = indexedVoiceCallVolumeScale(current, max);
+                }
+                logVoiceCallTrackVolume(current, max, deviceType, db, scale);
+                return scale;
+            }
+            if (max <= min) return 1.0f;
+            float scale = indexedVoiceCallVolumeScale(current, max);
+            logVoiceCallTrackVolume(current, max, -1, Float.NaN, scale);
+            return scale;
+        } catch (RuntimeException error) {
+            Log.d(TAG, "voice call track volume scale failed: " + error.getMessage());
+            return 1.0f;
+        }
+    }
+
+    private void logVoiceCallTrackVolume(int current, int max, int deviceType, float db, float scale) {
+        String detail = current + "/" + max + ":" + deviceType + ":" + db + ":" + scale;
+        if (detail.equals(lastLoggedRealtimePlaybackVolume)) return;
+        lastLoggedRealtimePlaybackVolume = detail;
+        Log.d(TAG, "voice call track volume current=" + current
+                + " max=" + max
+                + " deviceType=" + deviceType
+                + " db=" + db
+                + " scale=" + scale);
+    }
+
+    private static float indexedVoiceCallVolumeScale(int current, int max) {
+        if (max <= 0) return 1.0f;
+        return clampGain((float) current / (float) max);
+    }
+
+    private static float clampGain(float gain) {
+        if (Float.isNaN(gain)) return 1.0f;
+        return Math.max(0.0f, Math.min(1.0f, gain));
     }
 
     private void startBargeInInput(VoiceAudioAdapter adapter) {

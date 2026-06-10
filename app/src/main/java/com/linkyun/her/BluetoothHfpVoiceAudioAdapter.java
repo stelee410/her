@@ -29,8 +29,9 @@ final class BluetoothHfpVoiceAudioAdapter implements VoiceAudioAdapter {
         return routeManager.begin(headsets, allowAnyConnectedBluetooth);
     }
 
-    @Override public void beginOutput() {
-        if (routeManager != null) routeManager.begin(headsets, allowAnyConnectedBluetooth);
+    @Override public AudioDeviceInfo beginOutput() {
+        if (routeManager == null) return null;
+        return routeManager.beginOutput(headsets, allowAnyConnectedBluetooth);
     }
 
     @Override public boolean useVoiceCommunicationPlayback() {

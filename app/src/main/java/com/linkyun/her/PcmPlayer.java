@@ -1,6 +1,7 @@
 package com.linkyun.her;
 
 import android.media.AudioAttributes;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioTrack;
 import android.util.Log;
@@ -10,6 +11,7 @@ final class PcmPlayer {
     private AudioTrack track;
     private int sampleRate = 24000;
     private boolean voiceCommunication;
+    private AudioDeviceInfo preferredOutputDevice;
     private long framesWritten;
     private float volumeGain = 1.0f;
 
@@ -22,9 +24,14 @@ final class PcmPlayer {
     }
 
     synchronized void begin(int rate, boolean useVoiceCommunication) {
+        begin(rate, useVoiceCommunication, null);
+    }
+
+    synchronized void begin(int rate, boolean useVoiceCommunication, AudioDeviceInfo preferredOutput) {
         stop();
         sampleRate = rate;
         voiceCommunication = useVoiceCommunication;
+        preferredOutputDevice = preferredOutput;
         framesWritten = 0;
         Log.d(tag, "player begin sampleRate=" + sampleRate);
         ensureTrack();
@@ -84,6 +91,17 @@ final class PcmPlayer {
                 .setBufferSizeInBytes(Math.max(min, sampleRate))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build();
+        if (preferredOutputDevice != null) {
+            try {
+                boolean preferred = track.setPreferredDevice(preferredOutputDevice);
+                Log.d(tag, "AudioTrack preferred output type="
+                        + preferredOutputDevice.getType()
+                        + " id=" + preferredOutputDevice.getId()
+                        + " applied=" + preferred);
+            } catch (RuntimeException error) {
+                Log.d(tag, "AudioTrack preferred output failed: " + error.getMessage());
+            }
+        }
         track.play();
         track.setVolume(volumeGain);
         Log.d(tag, "AudioTrack playState=" + track.getPlayState());

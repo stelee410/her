@@ -279,8 +279,9 @@ public final class VoiceSessionOrchestratorTest {
 
         assertEquals("persistClear", host.events.get(0));
         assertEquals("state:ready", host.events.get(1));
-        assertEquals("scheduleListen:650", host.events.get(2));
-        assertEquals(3, host.events.size());
+        assertEquals("state:listening", host.events.get(2));
+        assertEquals("scheduleListen:650", host.events.get(3));
+        assertEquals(4, host.events.size());
     }
 
     @Test

@@ -173,7 +173,7 @@ final class VoiceSessionOrchestrator {
             host.finishInitializationWithSummary();
             return;
         }
-        if (canListenImmediately) host.setState("listening");
+        if (canListenImmediately || shouldScheduleListening) host.setState("listening");
         if (shouldScheduleListening) host.scheduleContinuousListening(resumeDelayMs);
     }
 }

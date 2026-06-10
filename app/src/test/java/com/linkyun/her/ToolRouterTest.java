@@ -21,6 +21,28 @@ public final class ToolRouterTest {
     }
 
     @Test
+    public void routesVolumeBeforeOtherTools() {
+        Host host = new Host();
+        ToolRouter router = new ToolRouter(ToolRegistry.defaults(), host);
+
+        assertTrue(router.routeUserText("声音小一点，天气等会儿再说", true));
+
+        assertEquals("volume:DOWN", host.events.get(1));
+    }
+
+    @Test
+    public void routesVolumeUpAndDownCommands() {
+        Host host = new Host();
+        ToolRouter router = new ToolRouter(ToolRegistry.defaults(), host);
+
+        assertTrue(router.routeUserText("声音大一点", true));
+        assertTrue(router.routeUserText("音量调低一点", true));
+
+        assertEquals("volume:UP", host.events.get(1));
+        assertEquals("volume:DOWN", host.events.get(3));
+    }
+
+    @Test
     public void trimsUserTextBeforeRouting() {
         Host host = new Host();
         ToolRouter router = new ToolRouter(ToolRegistry.defaults(), host);
@@ -129,6 +151,10 @@ public final class ToolRouterTest {
 
         @Override public void startWeather(String question, boolean realtimeMode) {
             events.add("weather:" + question + ":" + realtimeMode);
+        }
+
+        @Override public void adjustVoiceVolume(VolumeSkill.Direction direction) {
+            events.add("volume:" + direction);
         }
 
         @Override public void logToolRoute(String message) {

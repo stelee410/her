@@ -13,6 +13,7 @@ public final class ToolRegistryTest {
     public void defaultsRegisterNewsWeatherAndBackgroundNews() {
         ToolRegistry registry = ToolRegistry.defaults();
 
+        assertEquals(VolumeToolDefinition.ID, registry.match("声音大一点").id());
         assertEquals(NewsToolDefinition.ID, registry.match("查一下新闻").id());
         assertEquals(WeatherToolDefinition.ID, registry.match("深圳天气怎么样").id());
         assertEquals(NewsToolDefinition.ID, registry.backgroundTool("daily_news").id());

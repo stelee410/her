@@ -7,6 +7,7 @@ final class ToolRouter {
         void startNews(String question, boolean realtimeMode);
         void startNewsFromBackground(String question);
         void startWeather(String question, boolean realtimeMode);
+        void adjustVoiceVolume(VolumeSkill.Direction direction);
         void logToolRoute(String message);
     }
 

@@ -13,6 +13,7 @@ final class ToolRegistry {
 
     static ToolRegistry defaults() {
         List<ToolDefinition> definitions = new ArrayList<>();
+        definitions.add(new VolumeToolDefinition());
         definitions.add(new NewsToolDefinition());
         definitions.add(new WeatherToolDefinition());
         return new ToolRegistry(definitions);
