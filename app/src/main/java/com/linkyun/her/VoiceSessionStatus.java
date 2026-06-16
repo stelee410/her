@@ -11,6 +11,7 @@ enum VoiceSessionStatus {
     NEWS_ACK("news_ack"),
     NEWS_TOOL("news_tool"),
     WEATHER_TOOL("weather_tool"),
+    APP_RUNNING("app_running"),
     SUMMARIZING("summarizing"),
     TEXT_ONLY("text_only"),
     ERROR("error"),

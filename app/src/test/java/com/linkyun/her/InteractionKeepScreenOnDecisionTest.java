@@ -29,6 +29,8 @@ public final class InteractionKeepScreenOnDecisionTest {
     public void fallsBackToVoiceStateKeepScreenRule() {
         assertTrue(InteractionKeepScreenOnDecision.shouldKeepScreenOn(
                 false, false, false, false, false, false, false, VoiceSessionState.fromLegacy("processing")));
+        assertTrue(InteractionKeepScreenOnDecision.shouldKeepScreenOn(
+                false, false, false, false, false, false, false, VoiceSessionState.fromLegacy("app_running")));
         assertFalse(InteractionKeepScreenOnDecision.shouldKeepScreenOn(
                 false, false, false, false, false, false, false, VoiceSessionState.fromLegacy("ready")));
         assertFalse(InteractionKeepScreenOnDecision.shouldKeepScreenOn(

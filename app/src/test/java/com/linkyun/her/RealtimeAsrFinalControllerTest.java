@@ -61,8 +61,37 @@ public final class RealtimeAsrFinalControllerTest {
 
         controller.onFinalText("聊聊天");
 
+        assertEquals("clearActive", host.events.get(3));
         assertEquals("route:聊聊天:true", host.events.get(5));
         assertEquals("background:聊聊天", host.events.get(6));
+        assertEquals(7, host.events.size());
+    }
+
+    @Test
+    public void foregroundToolDoesNotRunBackgroundRoute() {
+        Host host = new Host();
+        host.routeTool = true;
+        RealtimeAsrFinalController controller = new RealtimeAsrFinalController(host);
+
+        controller.onFinalText("换一个人");
+
+        assertEquals("clearActive", host.events.get(3));
+        assertEquals("route:换一个人:true", host.events.get(5));
+        assertEquals(6, host.events.size());
+    }
+
+    @Test
+    public void duplicateRealtimeFinalInsideWindowIsIgnored() {
+        Host host = new Host();
+        FakeClock clock = new FakeClock();
+        RealtimeAsrFinalController controller = new RealtimeAsrFinalController(host, clock);
+
+        controller.onFinalText("精致的，是吧？");
+        controller.onFinalText("精致的，是吧？");
+
+        assertEquals(8, host.events.size());
+        assertEquals("background:精致的，是吧？", host.events.get(6));
+        assertEquals("cancelTimeout", host.events.get(7));
     }
 
     @Test
@@ -141,5 +170,10 @@ public final class RealtimeAsrFinalControllerTest {
         }
         @Override public void routeToolsInBackground(String text) { events.add("background:" + text); }
         @Override public void setState(String nextState) { events.add("state:" + nextState); }
+    }
+
+    private static final class FakeClock implements RealtimeAsrFinalController.Clock {
+        long now;
+        @Override public long nowMs() { return now; }
     }
 }

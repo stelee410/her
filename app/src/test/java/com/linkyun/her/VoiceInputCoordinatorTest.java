@@ -134,6 +134,31 @@ public final class VoiceInputCoordinatorTest {
     }
 
     @Test
+    public void requestStartIsBlockedWhenMicPaused() {
+        Host host = new Host();
+        host.micPaused = true;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.requestStart(true, "manual", true);
+
+        assertFalse(coordinator.hasPendingStart());
+        assertEquals(0, host.startCount);
+        assertEquals(0, host.events.size());
+    }
+
+    @Test
+    public void scheduledContinuousListeningIsBlockedWhenMicPaused() {
+        Host host = new Host();
+        host.micPaused = true;
+        VoiceInputCoordinator coordinator = new VoiceInputCoordinator(host, host, true);
+
+        coordinator.scheduleContinuousListening(100);
+        host.runScheduled();
+
+        assertEquals(0, host.startCount);
+    }
+
+    @Test
     public void automaticStartWithoutPermissionDoesNotRemainPending() {
         Host host = new Host();
         host.permission = false;
@@ -257,6 +282,7 @@ public final class VoiceInputCoordinatorTest {
         boolean toolTts;
         boolean ready = true;
         boolean voiceSurface = true;
+        boolean micPaused;
         int startCount;
 
         @Override public void postDelayed(Runnable runnable, long delayMs) {
@@ -277,6 +303,7 @@ public final class VoiceInputCoordinatorTest {
         @Override public boolean hasActiveToolTtsPlayback() { return toolTts; }
         @Override public boolean isReadyForContinuousListening() { return ready; }
         @Override public boolean isVoiceSurfaceActive() { return voiceSurface; }
+        @Override public boolean isMicPaused() { return micPaused; }
         @Override public void requestRecordPermission() { events.add("permission"); }
         @Override public void connectRealtime() { events.add("connect"); }
         @Override public void prepareInputStart(String interruptReason) { events.add("prepare:" + interruptReason); }

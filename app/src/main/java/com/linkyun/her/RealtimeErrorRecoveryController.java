@@ -48,8 +48,7 @@ final class RealtimeErrorRecoveryController {
             degradeInitialization(message);
             return;
         }
-        host.setState("error");
-        host.toastError(message);
+        retry(message);
     }
 
     void retry(String reason) {

@@ -14,6 +14,7 @@ final class VoiceInputCoordinator {
         boolean hasActiveToolTtsPlayback();
         boolean isReadyForContinuousListening();
         boolean isVoiceSurfaceActive();
+        boolean isMicPaused();
         void requestRecordPermission();
         void connectRealtime();
         void prepareInputStart(String interruptReason);
@@ -57,6 +58,10 @@ final class VoiceInputCoordinator {
             return;
         }
         if (!host.isVoiceSurfaceActive()) {
+            clearPendingStart();
+            return;
+        }
+        if (host.isMicPaused()) {
             clearPendingStart();
             return;
         }
@@ -131,6 +136,7 @@ final class VoiceInputCoordinator {
         if (!continuousConversation) return;
         if (host.isTextModeActive()) return;
         if (!host.isVoiceSurfaceActive()) return;
+        if (host.isMicPaused()) return;
         if (host.hasActiveToolTtsPlayback()) return;
         if (host.isInputActive() || !host.isRealtimeOpen()) return;
         if (!host.isBoundHeadsetConnected()) return;
@@ -150,6 +156,10 @@ final class VoiceInputCoordinator {
             }
             if (!host.isVoiceSurfaceActive()) {
                 host.logVoiceInput("continuous listening blocked: voice surface inactive");
+                return;
+            }
+            if (host.isMicPaused()) {
+                host.logVoiceInput("continuous listening blocked: mic paused");
                 return;
             }
             if (host.hasActiveToolTtsPlayback()) {
@@ -180,6 +190,10 @@ final class VoiceInputCoordinator {
             return;
         }
         if (!host.isVoiceSurfaceActive()) {
+            clearPendingStart();
+            return;
+        }
+        if (host.isMicPaused()) {
             clearPendingStart();
             return;
         }

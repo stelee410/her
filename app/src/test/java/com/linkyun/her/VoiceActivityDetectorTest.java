@@ -18,6 +18,7 @@ public final class VoiceActivityDetectorTest {
     public void visualLevelIsCappedAtOneHundred() {
         VoiceActivityDetector detector = new VoiceActivityDetector();
 
+        detector.process(pcm((short) 9000));
         VoiceActivityDetector.Result result = detector.process(pcm((short) 9000));
 
         assertEquals(9000, result.level);
@@ -43,6 +44,7 @@ public final class VoiceActivityDetectorTest {
     public void endsInputAfterSpeechAndEnoughSilence() {
         VoiceActivityDetector detector = new VoiceActivityDetector();
         assertFalse(detector.process(pcm((short) 900)).shouldEndInput);
+        assertFalse(detector.process(pcm((short) 900)).shouldEndInput);
 
         VoiceActivityDetector.Result result = null;
         for (int i = 0; i < 44; i++) {
@@ -51,6 +53,23 @@ public final class VoiceActivityDetectorTest {
         }
 
         result = detector.process(pcm((short) 0));
+        assertTrue(result.shouldEndInput);
+    }
+
+    @Test
+    public void sensitiveDetectorEndsLowAmplitudeTabletSpeech() {
+        VoiceActivityDetector detector = new VoiceActivityDetector(150, 1.0f, 35, 110);
+        for (int i = 0; i < 20; i++) {
+            assertFalse(detector.process(pcm((short) 130)).speech);
+        }
+        assertFalse(detector.process(pcm((short) 180)).shouldEndInput);
+        assertTrue(detector.process(pcm((short) 180)).speech);
+
+        VoiceActivityDetector.Result result = null;
+        for (int i = 0; i < 45; i++) {
+            result = detector.process(pcm((short) 120));
+        }
+
         assertTrue(result.shouldEndInput);
     }
 

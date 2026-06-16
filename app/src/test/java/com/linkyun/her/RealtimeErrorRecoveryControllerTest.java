@@ -9,15 +9,21 @@ import org.junit.Test;
 
 public final class RealtimeErrorRecoveryControllerTest {
     @Test
-    public void transportErrorOutsideInitializationMovesToError() {
+    public void transportErrorOutsideInitializationSchedulesReconnect() {
         Host host = new Host();
         RealtimeErrorRecoveryController controller = new RealtimeErrorRecoveryController(host);
 
         controller.onTransportError("socket closed");
 
-        assertEquals("state:error", host.events.get(0));
-        assertEquals("toast:socket closed", host.events.get(1));
-        assertEquals(2, host.events.size());
+        assertEquals("toast:语音交互模型连接超时，正在重试 1/2...", host.events.get(0));
+        assertEquals("state:connecting", host.events.get(1));
+        assertEquals("closeRealtime", host.events.get(2));
+        assertEquals("postDelayed:1200", host.events.get(3));
+        assertEquals(1, controller.retryCount());
+
+        host.scheduled.run();
+
+        assertEquals("connectRealtime", host.events.get(4));
     }
 
     @Test

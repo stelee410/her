@@ -17,19 +17,40 @@ final class AssetVideoAvatarView extends FrameLayout {
     private static final long CROSSFADE_MS = 180;
     private static final String STANDBY_ASSET = "standby.mp4";
     private static final String TALKING_ASSET = "talking.mp4";
+    private static final int PHASE_GREETING = 0;
+    private static final int PHASE_IDLE = 1;
+    private static final int PHASE_SPEAKING = 2;
 
+    private final VideoLayer greetingLayer;
     private final VideoLayer standbyLayer;
     private final VideoLayer talkingLayer;
     private boolean speaking = false;
+    private int phase = PHASE_IDLE;
+    private boolean forceIdleAfterGreeting = false;
 
     AssetVideoAvatarView(Context context) {
+        this(context, null);
+    }
+
+    AssetVideoAvatarView(Context context, TabletDemoCharacter character) {
         super(context);
         setBackgroundColor(Color.BLACK);
-        standbyLayer = new VideoLayer(context, STANDBY_ASSET);
-        talkingLayer = new VideoLayer(context, TALKING_ASSET);
+        if (character == null) {
+            phase = PHASE_IDLE;
+            greetingLayer = new VideoLayer(context, STANDBY_ASSET, true, null);
+            standbyLayer = new VideoLayer(context, STANDBY_ASSET, true, null);
+            talkingLayer = new VideoLayer(context, TALKING_ASSET, true, null);
+        } else {
+            phase = PHASE_GREETING;
+            greetingLayer = new VideoLayer(context, character.greetingAsset, false, this::onGreetingFinished);
+            standbyLayer = new VideoLayer(context, character.idleAsset, true, null);
+            talkingLayer = new VideoLayer(context, character.speakingAsset, true, null);
+        }
+        addView(greetingLayer.texture, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         addView(standbyLayer.texture, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         addView(talkingLayer.texture, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
-        standbyLayer.texture.setAlpha(1f);
+        greetingLayer.texture.setAlpha(phase == PHASE_GREETING ? 1f : 0f);
+        standbyLayer.texture.setAlpha(phase == PHASE_IDLE ? 1f : 0f);
         talkingLayer.texture.setAlpha(0f);
     }
 
@@ -39,9 +60,18 @@ final class AssetVideoAvatarView extends FrameLayout {
         applyVisibleLayer(true);
     }
 
+    void replayGreetingThenIdle() {
+        speaking = false;
+        forceIdleAfterGreeting = true;
+        phase = PHASE_GREETING;
+        greetingLayer.restartIfReady();
+        applyVisibleLayer(true);
+    }
+
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
+        greetingLayer.startIfReady();
         standbyLayer.startIfReady();
         talkingLayer.startIfReady();
         applyVisibleLayer(false);
@@ -49,41 +79,74 @@ final class AssetVideoAvatarView extends FrameLayout {
 
     @Override
     protected void onDetachedFromWindow() {
+        greetingLayer.release();
         standbyLayer.release();
         talkingLayer.release();
         super.onDetachedFromWindow();
     }
 
     private void applyVisibleLayer(boolean animate) {
-        View visible = speaking ? talkingLayer.texture : standbyLayer.texture;
-        View hidden = speaking ? standbyLayer.texture : talkingLayer.texture;
+        phase = speaking ? PHASE_SPEAKING : (phase == PHASE_GREETING ? PHASE_GREETING : PHASE_IDLE);
+        VideoLayer visibleLayer = visibleLayer();
+        View visible = visibleLayer.texture;
         standbyLayer.startIfReady();
         talkingLayer.startIfReady();
+        if (phase == PHASE_GREETING) greetingLayer.startIfReady();
         visible.bringToFront();
-        visible.animate().cancel();
-        hidden.animate().cancel();
+        greetingLayer.texture.animate().cancel();
+        standbyLayer.texture.animate().cancel();
+        talkingLayer.texture.animate().cancel();
         if (animate) {
             visible.animate().alpha(1f).setDuration(CROSSFADE_MS).start();
-            hidden.animate().alpha(0f).setDuration(CROSSFADE_MS).start();
+            fadeHiddenLayers(visibleLayer);
         } else {
-            visible.setAlpha(1f);
-            hidden.setAlpha(0f);
+            greetingLayer.texture.setAlpha(visibleLayer == greetingLayer ? 1f : 0f);
+            standbyLayer.texture.setAlpha(visibleLayer == standbyLayer ? 1f : 0f);
+            talkingLayer.texture.setAlpha(visibleLayer == talkingLayer ? 1f : 0f);
         }
+    }
+
+    private void fadeHiddenLayers(VideoLayer visibleLayer) {
+        if (visibleLayer != greetingLayer) greetingLayer.texture.animate().alpha(0f).setDuration(CROSSFADE_MS).start();
+        if (visibleLayer != standbyLayer) standbyLayer.texture.animate().alpha(0f).setDuration(CROSSFADE_MS).start();
+        if (visibleLayer != talkingLayer) talkingLayer.texture.animate().alpha(0f).setDuration(CROSSFADE_MS).start();
+    }
+
+    private VideoLayer visibleLayer() {
+        if (phase == PHASE_GREETING) return greetingLayer;
+        if (phase == PHASE_SPEAKING) return talkingLayer;
+        return standbyLayer;
+    }
+
+    private void onGreetingFinished() {
+        if (phase != PHASE_GREETING) return;
+        if (forceIdleAfterGreeting) {
+            forceIdleAfterGreeting = false;
+            speaking = false;
+            phase = PHASE_IDLE;
+        } else {
+            phase = speaking ? PHASE_SPEAKING : PHASE_IDLE;
+        }
+        applyVisibleLayer(true);
     }
 
     private static final class VideoLayer implements TextureView.SurfaceTextureListener {
         final TextureView texture;
         private final Context context;
         private final String assetName;
+        private final boolean looping;
+        private final Runnable completion;
         private MediaPlayer player;
         private Surface surface;
         private boolean surfaceReady = false;
         private int videoWidth = 0;
         private int videoHeight = 0;
 
-        VideoLayer(Context context, String assetName) {
+        VideoLayer(Context context, String assetName, boolean looping, Runnable completion) {
             this.context = context;
             this.assetName = assetName;
+            this.looping = looping;
+            this.completion = completion;
             texture = new TextureView(context);
             texture.setSurfaceTextureListener(this);
         }
@@ -92,6 +155,16 @@ final class AssetVideoAvatarView extends FrameLayout {
             if (!surfaceReady) return;
             if (player == null) preparePlayer();
             if (player != null && !player.isPlaying()) player.start();
+        }
+
+        void restartIfReady() {
+            if (!surfaceReady) return;
+            if (player == null) preparePlayer();
+            if (player == null) return;
+            try {
+                player.seekTo(0);
+                player.start();
+            } catch (RuntimeException ignored) { }
         }
 
         void release() {
@@ -133,13 +206,16 @@ final class AssetVideoAvatarView extends FrameLayout {
             try (AssetFileDescriptor descriptor = context.getAssets().openFd(assetName)) {
                 nextPlayer.setDataSource(descriptor.getFileDescriptor(), descriptor.getStartOffset(), descriptor.getLength());
                 nextPlayer.setSurface(surface);
-                nextPlayer.setLooping(true);
+                nextPlayer.setLooping(looping);
                 nextPlayer.setVolume(0f, 0f);
                 nextPlayer.setOnVideoSizeChangedListener((mp, width, height) -> {
                     videoWidth = width;
                     videoHeight = height;
                     updateTransform();
                 });
+                if (completion != null) {
+                    nextPlayer.setOnCompletionListener(mp -> completion.run());
+                }
                 nextPlayer.prepare();
                 player = nextPlayer;
             } catch (IOException | RuntimeException ignored) {

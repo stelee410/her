@@ -62,6 +62,10 @@ final class VoiceSessionState {
         return status == VoiceSessionStatus.WEATHER_TOOL;
     }
 
+    boolean isAppRunning() {
+        return status == VoiceSessionStatus.APP_RUNNING;
+    }
+
     boolean isResponsePending() {
         return status == VoiceSessionStatus.THINKING || status == VoiceSessionStatus.PROCESSING;
     }
@@ -74,6 +78,7 @@ final class VoiceSessionState {
                 status == VoiceSessionStatus.NEWS_ACK ||
                 status == VoiceSessionStatus.NEWS_TOOL ||
                 status == VoiceSessionStatus.WEATHER_TOOL ||
+                status == VoiceSessionStatus.APP_RUNNING ||
                 status == VoiceSessionStatus.SUMMARIZING;
     }
 
@@ -92,6 +97,7 @@ final class VoiceSessionState {
         if (status == VoiceSessionStatus.NEWS_ACK) return "Checking news";
         if (status == VoiceSessionStatus.NEWS_TOOL) return "Reading agentNews";
         if (status == VoiceSessionStatus.WEATHER_TOOL) return "Checking weather";
+        if (status == VoiceSessionStatus.APP_RUNNING) return "App running";
         if (status == VoiceSessionStatus.SUMMARIZING) return "Summarizing";
         if (status == VoiceSessionStatus.TEXT_ONLY) return "Text only";
         if (status == VoiceSessionStatus.ERROR) return "Error";
@@ -108,6 +114,7 @@ final class VoiceSessionState {
                            boolean newsInterruptionAvailable) {
         if (toolTtsAvailable) return "■";
         if (weatherInterruptionAvailable) return "■";
+        if (isAppRunning()) return "■";
         if (isNewsTool() || isWeatherTool() || newsInterruptionAvailable) return "■";
         return "♩";
     }

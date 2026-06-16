@@ -33,6 +33,9 @@ public final class VoiceSilenceTextModeDecisionTest {
         assertFalse(VoiceSilenceTextModeDecision.shouldMonitor(
                 true, true, false, false, false, false, false, false,
                 VoiceSessionState.fromLegacy("speaking")));
+        assertFalse(VoiceSilenceTextModeDecision.shouldMonitor(
+                true, true, false, false, false, false, false, false,
+                VoiceSessionState.fromLegacy("app_running")));
     }
 
     @Test

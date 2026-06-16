@@ -44,6 +44,8 @@ import org.json.JSONObject;
 
 import java.io.IOException;
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.text.SimpleDateFormat;
@@ -62,6 +64,7 @@ public class MainActivity extends Activity {
     private static final int REQ_NOTIFY = 72;
     private static final int REQ_LOCATION = 73;
     private static final int REQ_BLUETOOTH_CONNECT = 74;
+    private static final int REQ_VIDEO_LIBRARY = 75;
     private static final boolean HALF_DUPLEX = true;
     private static final boolean CONTINUOUS_CONVERSATION = true;
     private static final int INIT_TARGET_USER_TURNS = 3;
@@ -73,6 +76,11 @@ public class MainActivity extends Activity {
     private static final long ASR_FINAL_TIMEOUT_MS = 2_800;
     private static final long VOICE_SILENCE_TEXT_MODE_TIMEOUT_MS = 60_000;
     private static final float INIT_OPENING_TTS_GAIN = 0.45f;
+    private static final float TABLET_DEMO_INPUT_GAIN = 24.0f;
+    private static final int TABLET_DEMO_VAD_SPEECH_THRESHOLD = 150;
+    private static final float TABLET_DEMO_VAD_NOISE_MULTIPLIER = 1.0f;
+    private static final int TABLET_DEMO_VAD_NOISE_OFFSET = 35;
+    private static final float TABLET_DEMO_VAD_INITIAL_NOISE_FLOOR = 110;
     private static final int TEXT_ASR_SLIDE_THRESHOLD_DP = 82;
     private static final int TEXT_ASR_PREBUFFER_MAX_BYTES = 96_000;
     private static final String USER_MEMORY_FILE = "user.md";
@@ -83,6 +91,7 @@ public class MainActivity extends Activity {
     private static final String PREF_DEMO_MODE = "demo_mode";
     private static final String PREF_DIGITAL_AVATAR_ENABLED = "digital_avatar_enabled";
     private static final String PREF_DIGITAL_AVATAR_PLAYBACK_MODE = "digital_avatar_playback_mode";
+    private static final String PREF_TABLET_DEMO_CHARACTER = "tablet_demo_character";
     private static final String[] AGENT_NAME_CANDIDATE_NAMES = {
             "Ava", "Chloe", "Nora", "Clara", "Mira", "Aria",
             "Iris", "Luna", "Elara", "Serena", "Evelyn", "Victoria"
@@ -95,7 +104,8 @@ public class MainActivity extends Activity {
             "你正在和用户进行实时语音或文字对话。回复要自然、短一些，有情绪感，但不要装腔作势。\n" +
             "当用户焦虑、孤独、疲惫或犹豫时，先共情，再给一个轻柔可执行的下一步。\n" +
             "如果用户说“换个形象”“换装”“换套衣服”等数字形象控制口令，客户端会执行本地换装视频；你只回复“稍等”。\n" +
-            "如果用户说“想看看你的宠物”“看看你的宠物”“小猫”“猫”等宠物展示口令，客户端会执行本地宠物视频；你只回复“稍等”。";
+            "如果用户说“想看看你的宠物”“看看你的宠物”“小猫”“猫”等宠物展示口令，客户端会执行本地宠物视频；你只回复“稍等”。\n" +
+            "如果用户说“我要看电视”“打开电视”等电视口令，客户端会打开本地电视播放卡片；你只回复“稍等”。";
     private static final String INIT_BASE_PROMPT =
             "你是一个 AI Agent，也是用户的朋友和助理。\n" +
             "你是语音交互模型，负责自然说话和倾听；c-her 是后台意识模型，负责工具调用、总结与写入长期记忆。\n" +
@@ -150,9 +160,13 @@ public class MainActivity extends Activity {
     private final MicStreamer mic = new MicStreamer();
     private final PcmPlayer player = new PcmPlayer(TAG);
     private final VoiceAudioAdapter speakerVoiceAudioAdapter = new SpeakerVoiceAudioAdapter();
+    private final VoiceprintEngine voiceprintEngine = new SignalVoiceprintEngine();
     private GatewayTtsPlayer ttsPlayer;
     private HeadsetBindingManager headsets;
     private VoiceAudioRouteManager voiceAudioRoute;
+    private VoiceprintProfileStore voiceprintStore;
+    private VoiceprintGate voiceprintGate;
+    private VoiceprintEnrollmentCapture voiceprintEnrollmentCapture;
     private VoiceAudioAdapter activeVoiceAudioAdapter;
     private AudioDeviceInfo activeVoiceOutputDevice;
     private float lastLoggedRealtimePlaybackGain = -1.0f;
@@ -181,6 +195,11 @@ public class MainActivity extends Activity {
     private VoiceInputCoordinator voiceInput;
     private MediaSession headsetMediaSession;
     private HerUi ui;
+    private long lastMicInputLogAt;
+    private int micInputFramesThisTurn;
+    private RetroTvOverlayView tvOverlayView;
+    private AppRunningSession appRunningSession;
+    private Runnable appRunningRestoreRetry;
 
     private FrameLayout root;
     private long sessionId = -1;
@@ -209,7 +228,10 @@ public class MainActivity extends Activity {
     private boolean demoMode = false;
     private boolean digitalAvatarEnabled = false;
     private String digitalAvatarPlaybackMode = AvatarPlaybackMode.JESS;
+    private TabletDemoCharacter tabletDemoCharacter = TabletDemoCharacterCatalog.defaultCharacter();
     private boolean voiceInputSurfaceActive = false;
+    private boolean tabletDemoMicPaused = false;
+    private boolean skipNextVoiceAutoStart = false;
     private boolean compactInProgress = false;
     private boolean memoryDirtyForRealtime = false;
     private boolean inputAudioOpen = false;
@@ -218,6 +240,10 @@ public class MainActivity extends Activity {
     private boolean textModeAsrRecording = false;
     private boolean pendingTextModeAsrAfterPermission = false;
     private boolean pendingVoiceInputAfterBluetoothPermission = false;
+    private boolean pendingVoiceprintEnrollmentAfterPermission = false;
+    private boolean pendingTvAfterVideoPermission = false;
+    private boolean voiceprintRejectedThisTurn = false;
+    private boolean voiceprintEnrollmentFinishing = false;
     private boolean textModeAsrTaskReady = false;
     private boolean textModeAsrFinishAfterStart = false;
     private boolean textModeAsrTouchActive = false;
@@ -261,6 +287,7 @@ public class MainActivity extends Activity {
     private Runnable asrFinalTimeout;
     private Runnable voiceSilenceTextModeTimeout;
     private Runnable realtimeOutputFinishDrain;
+    private Runnable voiceprintEnrollmentTimeout;
     private Runnable textModeAsrPulse;
     private Runnable textReplyPlaceholderTicker;
     private boolean conversationOverLockscreen = false;
@@ -320,30 +347,42 @@ public class MainActivity extends Activity {
         headsets = new HeadsetBindingManager(this, prefs, this::onHeadsetDevicesChanged);
         headsets.start();
         voiceAudioRoute = new VoiceAudioRouteManager(this);
-        demoMode = prefs.getBoolean(PREF_DEMO_MODE, false);
-        digitalAvatarEnabled = prefs.getBoolean(PREF_DIGITAL_AVATAR_ENABLED, false);
-        digitalAvatarPlaybackMode = AvatarPlaybackMode.normalize(
-                prefs.getString(PREF_DIGITAL_AVATAR_PLAYBACK_MODE, AvatarPlaybackMode.JESS));
+        voiceprintStore = new VoiceprintProfileStore(prefs);
+        tabletDemoCharacter = TabletDemoCharacterCatalog.find(
+                prefs.getString(PREF_TABLET_DEMO_CHARACTER, TabletDemoCharacterCatalog.defaultCharacter().id));
+        applyTabletDemoVoiceSelection();
+        demoMode = tabletDemoMode() || prefs.getBoolean(PREF_DEMO_MODE, false);
+        digitalAvatarEnabled = tabletDemoMode() || prefs.getBoolean(PREF_DIGITAL_AVATAR_ENABLED, false);
+        digitalAvatarPlaybackMode = tabletDemoMode()
+                ? AvatarPlaybackMode.ASSETS_FULLSCREEN
+                : AvatarPlaybackMode.normalize(
+                        prefs.getString(PREF_DIGITAL_AVATAR_PLAYBACK_MODE, AvatarPlaybackMode.JESS));
         headsetController = createHeadsetController();
         setupHeadsetMediaSession();
         memoryStore = new MemoryStore(this);
         memoryCoordinator = createMemoryCoordinator();
         String persistedAgentName = prefs.getString("agent_name", SYSTEM_AGENT_NAME);
         String persistedUserName = prefs.getString("user_name", "");
-        userMemory = readUserMemory();
-        agentMemory = readAgentMemory();
-        initialized = !userMemory.trim().isEmpty();
-        agentName = StartupProfileNames.startupAgentName(
-                persistedAgentName, initialized, agentMemory, SYSTEM_AGENT_NAME);
-        userName = StartupProfileNames.startupUserName(persistedUserName, userMemory);
+        userMemory = tabletDemoMode() ? "" : readUserMemory();
+        agentMemory = tabletDemoMode() ? readTabletDemoAgentMd(tabletDemoCharacter) : readAgentMemory();
+        initialized = tabletDemoMode() || !userMemory.trim().isEmpty();
+        agentName = tabletDemoMode()
+                ? tabletDemoCharacter.label
+                : StartupProfileNames.startupAgentName(
+                        persistedAgentName, initialized, agentMemory, SYSTEM_AGENT_NAME);
+        userName = tabletDemoMode() ? "" : StartupProfileNames.startupUserName(persistedUserName, userMemory);
         sessionId = memoryStore.startSession(agentName);
         conversationMemory = memoryStore.relevantMemory("");
         dynamicTone = memoryStore.latestTone();
-        messages.add(new Message("welcome", "assistant", initialized
-                ? "我在这里。今天想从哪里开始？"
-                : "我们先认识一下，好吗？"));
+        messages.add(new Message("welcome", "assistant", tabletDemoMode()
+                ? "你好，我是 " + agentName + "。"
+                : (initialized
+                        ? "我在这里。今天想从哪里开始？"
+                        : "我们先认识一下，好吗？")));
 
-        if (initialized) {
+        if (tabletDemoMode()) {
+            showVoiceHome();
+        } else if (initialized) {
             showHome();
         } else {
             beginInitialization("");
@@ -427,6 +466,10 @@ public class MainActivity extends Activity {
 
                     @Override public boolean isVoiceSurfaceActive() {
                         return voiceInputSurfaceActive;
+                    }
+
+                    @Override public boolean isMicPaused() {
+                        return tabletDemoMicPaused;
                     }
 
                     @Override public void requestRecordPermission() {
@@ -1473,6 +1516,9 @@ public class MainActivity extends Activity {
         if (asrFinalTimeout != null) main.removeCallbacks(asrFinalTimeout);
         cancelVoiceSilenceTextModeTimeout();
         cancelRealtimeOutputFinishDrain();
+        cancelVoiceprintEnrollmentTimeout();
+        cancelAppRunningRestoreRetry();
+        dismissTvOverlay(false);
         stopTextReplyPlaceholderTicker();
         clearConversationOverLockscreen();
         restoreReplyScreenBrightness();
@@ -1675,6 +1721,19 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grants) {
         super.onRequestPermissionsResult(requestCode, permissions, grants);
+        if (requestCode == REQ_VIDEO_LIBRARY) {
+            boolean granted = grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED;
+            if (pendingTvAfterVideoPermission) {
+                pendingTvAfterVideoPermission = false;
+                if (granted) {
+                    showTvOverlay();
+                } else {
+                    toastError("需要视频读取权限才能播放 /sdcard/mytv。");
+                    restoreAfterFailedTvOverlayOpen();
+                }
+            }
+            return;
+        }
         if (requestCode == REQ_BLUETOOTH_CONNECT) {
             boolean granted = grants.length > 0 && grants[0] == PackageManager.PERMISSION_GRANTED;
             if (pendingVoiceInputAfterBluetoothPermission) {
@@ -1690,6 +1749,11 @@ public class MainActivity extends Activity {
         PermissionResultDecision decision = PermissionResultDecision.decide(
                 requestCode, grants, REQ_AUDIO, REQ_LOCATION, PackageManager.PERMISSION_GRANTED);
         if (decision.action == PermissionResultDecision.Action.RECORD_GRANTED) {
+            if (pendingVoiceprintEnrollmentAfterPermission) {
+                pendingVoiceprintEnrollmentAfterPermission = false;
+                startVoiceprintEnrollmentCapture();
+                return;
+            }
             if (pendingTextModeAsrAfterPermission) {
                 pendingTextModeAsrAfterPermission = false;
                 startTextModeAsr();
@@ -1697,6 +1761,11 @@ public class MainActivity extends Activity {
             }
             if (voiceInput != null) voiceInput.onRecordPermissionGranted();
         } else if (decision.action == PermissionResultDecision.Action.RECORD_DENIED) {
+            if (pendingVoiceprintEnrollmentAfterPermission) {
+                pendingVoiceprintEnrollmentAfterPermission = false;
+                toastError("需要录音权限才能录入声纹。");
+                return;
+            }
             if (pendingTextModeAsrAfterPermission) {
                 pendingTextModeAsrAfterPermission = false;
                 toastError("需要录音权限才能语音输入文字。");
@@ -1771,14 +1840,17 @@ public class MainActivity extends Activity {
         if (homeClockTicker != null) main.removeCallbacks(homeClockTicker);
         HomePage.Views views = HomePage.renderVoice(this, ui,
                 new HomePage.VoiceModel(lastConversationLine(),
-                        stateLabelText(),
+                        currentStateLabelText(),
                         moodForText(lastConversationLine()),
                         voiceCards == null ? null : voiceCards.latestWeather(),
                         voiceCards == null ? null : voiceCards.latestNews(),
                         digitalAvatarActive(),
                         digitalAvatarPlaybackMode,
                         voiceState.isSpeaking(),
-                        avatarEmotion),
+                        avatarEmotion,
+                        tabletDemoMode(),
+                        tabletDemoMicPaused,
+                        tabletDemoCharacter),
                 new HomePage.Callbacks() {
                     @Override public void onSettings() { showSettings(); }
                     @Override public void onChat() { showChat(); }
@@ -1800,6 +1872,10 @@ public class MainActivity extends Activity {
     }
 
     private void autoStartListeningOnVoiceSurface() {
+        if (skipNextVoiceAutoStart) {
+            skipNextVoiceAutoStart = false;
+            return;
+        }
         if (VoiceAutoStartDecision.shouldStartOnVoiceSurface(
                 initialized,
                 initializing,
@@ -2090,6 +2166,10 @@ public class MainActivity extends Activity {
     }
 
     private void showChat() {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "show chat blocked: app running active");
+            return;
+        }
         clearVoiceCards(false);
         enterTextMode();
         homeTimeView = null;
@@ -2119,6 +2199,10 @@ public class MainActivity extends Activity {
     }
 
     private void enterTextMode() {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "enter text mode blocked: app running active");
+            return;
+        }
         voiceInputSurfaceActive = false;
         cancelVoiceSilenceTextModeTimeout();
         TextModeEntryCleanupDecision cleanup = TextModeEntryCleanupDecision.enterTextMode();
@@ -2229,10 +2313,16 @@ public class MainActivity extends Activity {
         Runnable back = initializing ? this::showInitializationHome : (initialized ? this::showHome : () -> beginInitialization(agentName));
         root.addView(topBar("‹", "Settings", "", back, null));
         LinearLayout list = screenList();
-        list.addView(navRow("↺", "Reinitialize", "Reset memory", this::resetInitialization));
-        list.addView(navRow("⌫", "Clear Session", "Keep memory", this::clearCurrentSession));
-        list.addView(navRow("▣", "演示模式", demoMode ? "On · 本机麦克风与 Speaker" : "Off", this::showDemoModePrompt));
-        if (digitalAvatarAvailable()) {
+        if (tabletDemoMode()) {
+            list.addView(navRow("↺", "清空本轮演示", "不写入用户关系", this::resetTabletDemoConversation));
+            list.addView(navRow("▣", "演示角色", tabletDemoCharacter.label, this::showTabletDemoCharacterPicker));
+        } else {
+            list.addView(navRow("↺", "Reinitialize", "Reset memory", this::resetInitialization));
+            list.addView(navRow("⌫", "Clear Session", "Keep memory", this::clearCurrentSession));
+            list.addView(navRow("▣", "演示模式", demoMode ? "On · 本机麦克风与 Speaker" : "Off", this::showDemoModePrompt));
+        }
+        list.addView(navRow("◉", "声纹识别", voiceprintSettingsLabel(), this::showVoiceprintPrompt));
+        if (digitalAvatarAvailable() && !tabletDemoMode()) {
             list.addView(navRow("◌", "Enable 数字形象", digitalAvatarEnabled ? "On · Voice chat" : "Off",
                     () -> setDigitalAvatarEnabled(!digitalAvatarEnabled)));
             list.addView(navRow("▣", "数字形象视频源", AvatarPlaybackMode.settingsLabel(digitalAvatarPlaybackMode),
@@ -2249,7 +2339,107 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
+    private String voiceprintSettingsLabel() {
+        return voiceprintStore == null ? "Unavailable" : voiceprintStore.label();
+    }
+
+    private void showVoiceprintPrompt() {
+        if (voiceprintStore == null) return;
+        if (!voiceprintStore.hasProfile()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("声纹识别")
+                    .setMessage("录入时请用正常音量连续说 3 秒。声纹只保存在本机，不保存原始录音。")
+                    .setPositiveButton("开始录入", (dialog, which) -> startVoiceprintEnrollmentCapture())
+                    .setNegativeButton("取消", null)
+                    .show();
+            return;
+        }
+        String toggle = voiceprintStore.isEnabled() ? "关闭声纹识别" : "开启声纹识别";
+        CharSequence[] items = new CharSequence[]{toggle, "重新录入", "删除声纹"};
+        new AlertDialog.Builder(this)
+                .setTitle("声纹识别")
+                .setItems(items, (dialog, which) -> {
+                    if (which == 0) {
+                        voiceprintStore.setEnabled(!voiceprintStore.isEnabled());
+                        showSettings();
+                    } else if (which == 1) {
+                        startVoiceprintEnrollmentCapture();
+                    } else {
+                        voiceprintStore.clear();
+                        showSettings();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void startVoiceprintEnrollmentCapture() {
+        if (voiceprintStore == null) return;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingVoiceprintEnrollmentAfterPermission = true;
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            return;
+        }
+        if (mic.running || inputAudioOpen) stopInputAudio("ready");
+        clearVoiceInputRequests();
+        player.stop();
+        voiceprintEnrollmentCapture = new VoiceprintEnrollmentCapture(voiceprintEngine);
+        voiceprintEnrollmentFinishing = false;
+        startHerForegroundService(true);
+        boolean started = startMicCapture(bytes -> {
+            VoiceprintEnrollmentCapture capture = voiceprintEnrollmentCapture;
+            if (capture == null || voiceprintEnrollmentFinishing) return;
+            VoiceprintEnrollmentCapture.Result result = capture.accept(bytes);
+            if (result.complete) {
+                main.post(() -> finishVoiceprintEnrollment(true, "声纹录入完成。", result.embedding));
+            } else if (result.failed) {
+                main.post(() -> finishVoiceprintEnrollment(false, result.message, null));
+            }
+        });
+        if (!started) {
+            startHerForegroundService(false);
+            voiceprintEnrollmentCapture = null;
+            toastError("无法启动麦克风，请检查录音权限或重试。");
+            return;
+        }
+        setState("listening");
+        toastError("开始录入声纹，请连续说话 3 秒。");
+        scheduleVoiceprintEnrollmentTimeout();
+    }
+
+    private void scheduleVoiceprintEnrollmentTimeout() {
+        cancelVoiceprintEnrollmentTimeout();
+        voiceprintEnrollmentTimeout = () -> {
+            VoiceprintEnrollmentCapture capture = voiceprintEnrollmentCapture;
+            int progress = capture == null ? 0 : capture.progress();
+            finishVoiceprintEnrollment(false, "声纹录入超时，请重试。" + progress + "%", null);
+        };
+        main.postDelayed(voiceprintEnrollmentTimeout, 7_000);
+    }
+
+    private void cancelVoiceprintEnrollmentTimeout() {
+        if (voiceprintEnrollmentTimeout == null) return;
+        main.removeCallbacks(voiceprintEnrollmentTimeout);
+        voiceprintEnrollmentTimeout = null;
+    }
+
+    private void finishVoiceprintEnrollment(boolean success, String message, float[] embedding) {
+        if (voiceprintEnrollmentFinishing) return;
+        voiceprintEnrollmentFinishing = true;
+        cancelVoiceprintEnrollmentTimeout();
+        stopMicCapture();
+        startHerForegroundService(false);
+        voiceprintEnrollmentCapture = null;
+        if (success && embedding != null && voiceprintStore != null) {
+            voiceprintStore.save(embedding, 1);
+        }
+        setState(isTextModeActive() ? "text_only" : "ready");
+        toastError(message);
+        if (root != null) showSettings();
+    }
+
     private String headsetSettingsLabel() {
+        if (tabletDemoMode()) return "Tablet demo · 本机麦克风与 Speaker";
         return HeadsetSettingsLabel.build(
                 demoMode,
                 headsets != null && headsets.hasBoundHeadset(),
@@ -2269,6 +2459,7 @@ public class MainActivity extends Activity {
     }
 
     private void setDemoMode(boolean enabled) {
+        if (tabletDemoMode()) return;
         if (demoMode == enabled) return;
         demoMode = enabled;
         getSharedPreferences("her", MODE_PRIVATE).edit().putBoolean(PREF_DEMO_MODE, demoMode).apply();
@@ -2281,15 +2472,103 @@ public class MainActivity extends Activity {
         showSettings();
     }
 
+    private boolean tabletDemoMode() {
+        return BuildConfig.TABLET_DEMO_MODE;
+    }
+
+    private void showTabletDemoCharacterPicker() {
+        TabletDemoCharacter[] characters = TabletDemoCharacterCatalog.all();
+        CharSequence[] labels = new CharSequence[characters.length];
+        int checked = 0;
+        for (int i = 0; i < characters.length; i++) {
+            labels[i] = characters[i].label;
+            if (characters[i].id.equals(tabletDemoCharacter.id)) checked = i;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("演示角色")
+                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                    dialog.dismiss();
+                    setTabletDemoCharacter(characters[which]);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void setTabletDemoCharacter(TabletDemoCharacter character) {
+        if (character == null || character.id.equals(tabletDemoCharacter.id)) {
+            showSettings();
+            return;
+        }
+        tabletDemoCharacter = character;
+        getSharedPreferences("her", MODE_PRIVATE).edit()
+                .putString(PREF_TABLET_DEMO_CHARACTER, tabletDemoCharacter.id)
+                .apply();
+        agentName = tabletDemoCharacter.label;
+        agentMemory = readTabletDemoAgentMd(tabletDemoCharacter);
+        applyTabletDemoVoiceSelection();
+        resetTabletDemoConversation();
+    }
+
+    private void resetTabletDemoConversation() {
+        cancelMemoryCompaction();
+        cancelTextModeAsr();
+        clearVoiceInputRequests();
+        stopMicCapture();
+        player.stop();
+        realtime.close();
+        stopToolTtsPlayback(false);
+        resetRealtimeOutput();
+        clearWeatherInteraction();
+        clearNewsInteraction();
+        clearVoiceCards(false);
+        assistantAccumulator.clearActive();
+        userMemory = "";
+        conversationMemory = "";
+        dynamicTone = "404 Star tablet demo";
+        initialized = true;
+        initializing = false;
+        summaryInProgress = false;
+        tabletDemoMicPaused = false;
+        messages.clear();
+        messages.add(new Message("welcome", "assistant", "你好，我是 " + agentName + "。"));
+        setState("idle");
+        showVoiceHome();
+    }
+
+    private void applyTabletDemoVoiceSelection() {
+        if (!tabletDemoMode()) return;
+        if (tabletDemoCharacter.voiceIdOverride != null) {
+            selectedVoiceId = tabletDemoCharacter.voiceIdOverride;
+            selectedVoiceLabel = tabletDemoCharacter.label;
+            for (Voice voice : voices) {
+                if (voice.id.equals(selectedVoiceId)) {
+                    selectedVoiceLabel = voice.label;
+                    break;
+                }
+            }
+            return;
+        }
+        if (voices.isEmpty()) {
+            selectedVoiceId = DEFAULT_VOICE;
+            selectedVoiceLabel = "Doris Clone";
+            return;
+        }
+        int index = Math.max(0, tabletDemoCharacter.voiceSlot) % voices.size();
+        Voice voice = voices.get(index);
+        selectedVoiceId = voice.id;
+        selectedVoiceLabel = voice.label;
+    }
+
     private boolean digitalAvatarAvailable() {
         return BuildConfig.DIGITAL_AVATAR_ENABLED;
     }
 
     private boolean digitalAvatarActive() {
-        return digitalAvatarAvailable() && digitalAvatarEnabled;
+        return tabletDemoMode() || (digitalAvatarAvailable() && digitalAvatarEnabled);
     }
 
     private void setDigitalAvatarEnabled(boolean enabled) {
+        if (tabletDemoMode()) return;
         if (!digitalAvatarAvailable()) enabled = false;
         if (digitalAvatarEnabled == enabled) return;
         digitalAvatarEnabled = enabled;
@@ -2300,6 +2579,7 @@ public class MainActivity extends Activity {
     }
 
     private void setDigitalAvatarPlaybackMode(String mode) {
+        if (tabletDemoMode()) return;
         String normalized = AvatarPlaybackMode.normalize(mode);
         if (digitalAvatarPlaybackMode.equals(normalized)) return;
         digitalAvatarPlaybackMode = normalized;
@@ -2474,7 +2754,11 @@ public class MainActivity extends Activity {
         if (voiceOrbView != null) voiceOrbView.setConversationState(voiceState);
         if (digitalAvatarView != null) digitalAvatarView.setAvatarState(avatarEmotion, voiceState.isSpeaking());
         if (assetVideoAvatarView != null) assetVideoAvatarView.setSpeaking(voiceState.isSpeaking());
-        if (micButton != null) micButton.setText(mic.running || inputAudioOpen ? "●" : voiceButtonText());
+        if (micButton != null) {
+            micButton.setText(tabletDemoMode()
+                    ? (tabletDemoMicPaused ? "▶" : "Ⅱ")
+                    : (mic.running || inputAudioOpen ? "●" : voiceButtonText()));
+        }
     }
 
     private int moodForText(String text) {
@@ -2500,6 +2784,7 @@ public class MainActivity extends Activity {
     }
 
     private void persistMessage(Message message) {
+        if (tabletDemoMode()) return;
         if (memoryCoordinator != null) memoryCoordinator.persistMessage(message);
     }
 
@@ -2521,6 +2806,10 @@ public class MainActivity extends Activity {
     }
 
     private void compactConversation(MemoryChunk chunk) {
+        if (tabletDemoMode()) {
+            compactInProgress = false;
+            return;
+        }
         if (BuildConfig.AGENTLLM_API_KEY.isEmpty()) {
             compactInProgress = false;
             return;
@@ -2577,16 +2866,25 @@ public class MainActivity extends Activity {
     }
 
     private void handleAvatarVoiceCommand(String text) {
-        if (digitalAvatarView == null || text == null) return;
-        String normalized = text.replace("，", "")
-                .replace("。", "")
-                .replace("！", "")
-                .replace("？", "")
-                .replace(",", "")
-                .replace(".", "")
-                .replace("!", "")
-                .replace("?", "")
-                .trim();
+        if (text == null) return;
+        if (TvVoiceCommand.shouldOpen(text)) {
+            showTvOverlayFromCommand();
+            return;
+        }
+        String normalized = TabletDemoVoiceCommand.normalize(text);
+        if (tabletDemoMode() && TabletDemoVoiceCommand.shouldReplayGreeting(normalized)) {
+            replayTabletDemoGreeting();
+            return;
+        }
+        if (tabletDemoMode() && TabletDemoVoiceCommand.shouldShowHiddenJess(normalized)) {
+            switchTabletDemoCharacterTo(TabletDemoCharacterCatalog.hiddenJess());
+            return;
+        }
+        if (tabletDemoMode() && TabletDemoVoiceCommand.shouldChangeAvatar(normalized)) {
+            switchTabletDemoCharacterFromCommand();
+            return;
+        }
+        if (digitalAvatarView == null) return;
         if (normalized.contains("想看看你的宠物") ||
                 normalized.contains("看看你的宠物") ||
                 normalized.contains("你的宠物") ||
@@ -2596,14 +2894,206 @@ public class MainActivity extends Activity {
             applyContextUpdateForNextTurn(true);
             return;
         }
-        if (normalized.contains("换个形象") ||
-                normalized.contains("换一个形象") ||
-                normalized.contains("换套衣服") ||
-                normalized.contains("换身衣服") ||
-                normalized.contains("换装")) {
+        if (TabletDemoVoiceCommand.shouldChangeAvatar(normalized)) {
             digitalAvatarView.playOnce(AvatarVideoCatalog.randomImageChangeVideo(random.nextInt(4)));
             applyContextUpdateForNextTurn(true);
         }
+    }
+
+    private boolean handleTabletDemoLocalCommand(String text) {
+        if (!tabletDemoMode()) return false;
+        String normalized = TabletDemoVoiceCommand.normalize(text);
+        return TabletDemoVoiceCommand.shouldReplayGreeting(normalized) ||
+                TabletDemoVoiceCommand.shouldShowHiddenJess(normalized) ||
+                TabletDemoVoiceCommand.shouldChangeAvatar(normalized);
+    }
+
+    private void replayTabletDemoGreeting() {
+        if (assetVideoAvatarView != null) {
+            assetVideoAvatarView.replayGreetingThenIdle();
+        }
+        setState("ready");
+    }
+
+    private void switchTabletDemoCharacterFromCommand() {
+        TabletDemoCharacter next = nextTabletDemoCharacter();
+        switchTabletDemoCharacterTo(next);
+    }
+
+    private void switchTabletDemoCharacterTo(TabletDemoCharacter next) {
+        if (next == null || next.id.equals(tabletDemoCharacter.id)) return;
+        tabletDemoCharacter = next;
+        getSharedPreferences("her", MODE_PRIVATE).edit()
+                .putString(PREF_TABLET_DEMO_CHARACTER, tabletDemoCharacter.id)
+                .apply();
+        agentName = tabletDemoCharacter.label;
+        agentMemory = readTabletDemoAgentMd(tabletDemoCharacter);
+        applyTabletDemoVoiceSelection();
+        restartTabletDemoRealtimeForCharacterChange();
+        toastError("已切换到 " + agentName);
+        if (voiceInputSurfaceActive && !isTextModeActive()) {
+            showVoiceHome();
+        } else if (isTextModeActive()) {
+            showChat();
+        } else {
+            updateVoiceHome();
+        }
+    }
+
+    private void restartTabletDemoRealtimeForCharacterChange() {
+        clearVoiceInputRequests();
+        cancelAsrFinalTimeout();
+        if (mic.running || inputAudioOpen) {
+            stopInputAudio("ready");
+        } else {
+            setState("ready");
+        }
+        player.stop();
+        resetRealtimeOutput();
+        realtime.close();
+        memoryDirtyForRealtime = true;
+    }
+
+    private TabletDemoCharacter nextTabletDemoCharacter() {
+        TabletDemoCharacter[] characters = TabletDemoCharacterCatalog.all();
+        for (int i = 0; i < characters.length; i++) {
+            if (characters[i].id.equals(tabletDemoCharacter.id)) {
+                return characters[(i + 1) % characters.length];
+            }
+        }
+        return TabletDemoCharacterCatalog.defaultCharacter();
+    }
+
+    private void showTvOverlayFromCommand() {
+        addChatMessage("assistant", "稍等，电视打开了。");
+        renderMessages();
+        enterTvOverlayMode();
+        showTvOverlay();
+    }
+
+    private void enterTvOverlayMode() {
+        enterAppRunningSession(AppRunningSession.MY_TV, "tv_command");
+    }
+
+    private void enterAppRunningSession(String appId, String interruptReason) {
+        cancelAppRunningRestoreRetry();
+        appRunningSession = AppRunningSession.start(appId, voiceInputSurfaceActive, isTextModeActive());
+        clearVoiceInputRequests();
+        cancelAsrFinalTimeout();
+        if (mic.running || inputAudioOpen) stopInputAudio("ready");
+        interruptRealtimePlayback(interruptReason, false);
+        player.stop();
+        setState("app_running");
+    }
+
+    private void showTvOverlay() {
+        if (!hasVideoLibraryPermission()) {
+            pendingTvAfterVideoPermission = true;
+            requestPermissions(new String[]{videoLibraryPermission()}, REQ_VIDEO_LIBRARY);
+            return;
+        }
+        if (!MyTvPlaylist.ensureDirectory()) {
+            toastError("无法创建 " + MyTvPlaylist.displayPath());
+            restoreAfterFailedTvOverlayOpen();
+            return;
+        }
+        List<File> videos = MyTvPlaylist.videos();
+        FrameLayout host = root;
+        if (host == null) {
+            restoreAfterFailedTvOverlayOpen();
+            return;
+        }
+        if (tvOverlayView == null) {
+            tvOverlayView = new RetroTvOverlayView(this, ui, this::onTvOverlayDismissed);
+        } else if (tvOverlayView.getParent() instanceof FrameLayout) {
+            ((FrameLayout) tvOverlayView.getParent()).removeView(tvOverlayView);
+        }
+        host.addView(tvOverlayView, ui.frame(-1, -1));
+        tvOverlayView.bringToFront();
+        tvOverlayView.show(videos);
+        if (videos.isEmpty()) {
+            toastError("把视频放到 " + MyTvPlaylist.displayPath() + " 后再说“我要看电视”。");
+        }
+    }
+
+    private void dismissTvOverlay() {
+        dismissTvOverlay(true);
+    }
+
+    private void dismissTvOverlay(boolean restoreVoice) {
+        if (tvOverlayView == null) {
+            finishAppRunningSession(AppRunningSession.MY_TV, restoreVoice, 0, "tv_overlay_missing");
+            return;
+        }
+        if (!restoreVoice) finishAppRunningSession(AppRunningSession.MY_TV, false, 0, "tv_overlay_dismissed_without_restore");
+        RetroTvOverlayView overlay = tvOverlayView;
+        overlay.dismiss();
+    }
+
+    private void onTvOverlayDismissed() {
+        tvOverlayView = null;
+        finishAppRunningSession(AppRunningSession.MY_TV, true, 180, "tv_overlay_closed");
+    }
+
+    private void restoreAfterFailedTvOverlayOpen() {
+        finishAppRunningSession(AppRunningSession.MY_TV, true, 160, "tv_overlay_open_failed");
+    }
+
+    private void finishAppRunningSession(String appId, boolean restoreVoice, long restoreDelayMs, String restoreReason) {
+        AppRunningSession session = appRunningSession;
+        if (session == null) return;
+        if (!session.appId().equals(appId)) {
+            Log.d(TAG, "ignore app running finish for " + appId + ", active=" + session.appId());
+            return;
+        }
+        boolean shouldResume = session.shouldResumeVoiceAfterExit(restoreVoice);
+        appRunningSession = null;
+        if (voiceState.isAppRunning()) setState(isTextModeActive() ? "text_only" : "ready");
+        Log.d(TAG, "app running finished app=" + appId + " resumeVoice=" + shouldResume);
+        if (shouldResume) {
+            main.postDelayed(() -> restoreVoiceInteractionAfterAppRunning(restoreReason), restoreDelayMs);
+        }
+    }
+
+    private void restoreVoiceInteractionAfterAppRunning(String reason) {
+        if (!voiceInputSurfaceActive || isTextModeActive()) return;
+        if (mic.running || inputAudioOpen) return;
+        Log.d(TAG, "restore voice interaction after app running reason=" + reason);
+        if (voiceState.isAppRunning()) setState("ready");
+        if (!realtime.isOpen()) realtime.connect();
+        requestVoiceInputStart(true, reason, false);
+        scheduleAppRunningRestoreRetry();
+    }
+
+    private void scheduleAppRunningRestoreRetry() {
+        cancelAppRunningRestoreRetry();
+        appRunningRestoreRetry = () -> {
+            appRunningRestoreRetry = null;
+            if (isAppRunningSessionActive() || !voiceInputSurfaceActive || isTextModeActive()) return;
+            if (mic.running || inputAudioOpen) return;
+            Log.d(TAG, "retry restore voice interaction after app running");
+            requestVoiceInputStart(true, "app_running_closed_retry", false);
+        };
+        main.postDelayed(appRunningRestoreRetry, 950);
+    }
+
+    private void cancelAppRunningRestoreRetry() {
+        if (appRunningRestoreRetry == null) return;
+        main.removeCallbacks(appRunningRestoreRetry);
+        appRunningRestoreRetry = null;
+    }
+
+    private boolean isAppRunningSessionActive() {
+        return appRunningSession != null;
+    }
+
+    private boolean hasVideoLibraryPermission() {
+        return checkSelfPermission(videoLibraryPermission()) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private String videoLibraryPermission() {
+        if (Build.VERSION.SDK_INT >= 33) return Manifest.permission.READ_MEDIA_VIDEO;
+        return Manifest.permission.READ_EXTERNAL_STORAGE;
     }
 
     private void cancelMemoryCompaction() {
@@ -2635,6 +3125,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean routeToolQuestion(String text, boolean realtimeMode) {
+        if (handleTabletDemoLocalCommand(text)) return true;
         return toolRouter != null && toolRouter.routeUserText(text, realtimeMode);
     }
 
@@ -2921,6 +3412,10 @@ public class MainActivity extends Activity {
     }
 
     private void resumeListeningAfterToolTts(long delayMs) {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "resume after tool tts blocked: app running active");
+            return;
+        }
         if (voiceInput != null) voiceInput.resumeAfterToolTts(delayMs);
     }
 
@@ -2929,6 +3424,11 @@ public class MainActivity extends Activity {
     }
 
     private void requestVoiceInputStart(boolean requestPermission, String interruptReason, boolean showHeadsetPrompt) {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "voice input start blocked: app running active");
+            if (voiceInput != null) voiceInput.clearPendingStart();
+            return;
+        }
         if (voiceInput != null) voiceInput.requestStart(requestPermission, interruptReason, showHeadsetPrompt);
     }
 
@@ -3015,6 +3515,10 @@ public class MainActivity extends Activity {
     }
 
     private void startTextModeAsr() {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "text mode asr blocked: app running active");
+            return;
+        }
         if (!isTextModeActive()) return;
         if (summaryInProgress) return;
         if (textModeAsrStarting || textModeAsrRecording) return;
@@ -3248,7 +3752,40 @@ public class MainActivity extends Activity {
     }
 
     private void toggleMic() {
+        if (tabletDemoMode()) {
+            toggleTabletDemoMicPaused();
+            return;
+        }
         if (voiceSession != null) voiceSession.onMicToggle();
+    }
+
+    private void toggleTabletDemoMicPaused() {
+        setTabletDemoMicPaused(!tabletDemoMicPaused);
+    }
+
+    private void setTabletDemoMicPaused(boolean paused) {
+        if (tabletDemoMicPaused == paused) return;
+        tabletDemoMicPaused = paused;
+        if (paused) {
+            clearVoiceInputRequests();
+            cancelAsrFinalTimeout();
+            cancelVoiceSilenceTextModeTimeout();
+            if (mic.running || inputAudioOpen) {
+                stopMicCapture();
+                inputAudioOpen = false;
+                startHerForegroundService(false);
+            }
+            realtime.close();
+            resetRealtimeOutput();
+            setState("ready");
+        } else {
+            if (voiceInputSurfaceActive && !isTextModeActive()) {
+                if (!realtime.isOpen()) realtime.connect();
+                requestVoiceInputStart(true, "tablet_demo_resume", false);
+            }
+            setState("ready");
+        }
+        updateVoiceHome();
     }
 
     private void interruptNewsPlayback() {
@@ -3260,6 +3797,14 @@ public class MainActivity extends Activity {
     }
 
     private void startInputAudio() {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "start input audio blocked: app running active");
+            return;
+        }
+        if (tabletDemoMicPaused) {
+            Log.d(TAG, "start input audio blocked: tablet demo mic paused");
+            return;
+        }
         boolean hasRecordPermission =
                 checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
         if (!VoiceInputAudioDecision.canStart(isTextModeActive(), voiceInputSurfaceActive,
@@ -3275,15 +3820,22 @@ public class MainActivity extends Activity {
         markConversationInteraction(false);
         resetRealtimeOutput();
         resetVad();
+        resetVoiceprintGate();
+        lastMicInputLogAt = 0;
+        micInputFramesThisTurn = 0;
         if (audioLevelView != null) audioLevelView.setLevel(0);
         if (voiceOrbView != null) voiceOrbView.setLevel(0);
         startHerForegroundService(true);
         realtime.sendEvent("input_audio.start", null);
         inputAudioOpen = true;
         boolean started = startMicCapture(bytes -> {
-            if (inputAudioOpen && realtime.isOpen()) {
-                realtime.sendAudio(bytes);
-                processVad(bytes);
+            if (!inputAudioOpen) return;
+            byte[] input = tabletDemoMode() ? amplifyPcm16(bytes, TABLET_DEMO_INPUT_GAIN) : bytes;
+            updateLocalMicFeedback(input);
+            if (!realtime.isOpen()) return;
+            for (byte[] frame : voiceprintFramesForRealtime(input)) {
+                realtime.sendAudio(frame);
+                processVad(frame);
             }
         });
         if (started) {
@@ -3298,10 +3850,24 @@ public class MainActivity extends Activity {
     private boolean startMicCapture(AudioSink sink) {
         VoiceAudioAdapter adapter = selectVoiceAudioAdapter();
         activeVoiceAudioAdapter = adapter;
-        AudioDeviceInfo preferredInput = adapter.beginInput();
-        boolean started = mic.start(preferredInput, sink);
+        AudioDeviceInfo preferredInput = tabletDemoMode() ? preferredTabletDemoInput() : adapter.beginInput();
+        boolean started = tabletDemoMode()
+                ? mic.startRawMic(preferredInput, sink)
+                : mic.start(preferredInput, sink);
         if (!started) releaseVoiceAudioRoute();
         return started;
+    }
+
+    private AudioDeviceInfo preferredTabletDemoInput() {
+        AudioManager audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+        if (audioManager == null) return null;
+        AudioDeviceInfo fallback = null;
+        for (AudioDeviceInfo info : audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+            if (info.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC && fallback == null) {
+                fallback = info;
+            }
+        }
+        return fallback;
     }
 
     private void stopMicCapture() {
@@ -3361,6 +3927,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean shouldUseBluetoothHfpAudio() {
+        if (tabletDemoMode()) return false;
         if (headsets == null || voiceAudioRoute == null) return false;
         if (demoMode) return headsets.hasBluetoothHeadset(true);
         return headsets.isBoundConnected() && headsets.isBoundBluetoothHeadset();
@@ -3369,6 +3936,7 @@ public class MainActivity extends Activity {
     private void stopInputAudio(String nextState) {
         boolean keepAudioRoute = "processing".equals(nextState) || "speaking".equals(nextState);
         stopMicCapture(keepAudioRoute);
+        voiceprintGate = null;
         if (audioLevelView != null) audioLevelView.setLevel(0);
         if (voiceOrbView != null) voiceOrbView.setLevel(0);
         VoiceInputAudioDecision.StopDecision decision =
@@ -3412,8 +3980,87 @@ public class MainActivity extends Activity {
     }
 
     private void resetVad() {
-        voiceActivityDetector.reset();
+        if (tabletDemoMode()) {
+            voiceActivityDetector.configure(TABLET_DEMO_VAD_SPEECH_THRESHOLD,
+                    TABLET_DEMO_VAD_NOISE_MULTIPLIER,
+                    TABLET_DEMO_VAD_NOISE_OFFSET,
+                    TABLET_DEMO_VAD_INITIAL_NOISE_FLOOR);
+        } else {
+            voiceActivityDetector.configureDefault();
+        }
         voiceBargeInInterrupted = false;
+    }
+
+    private byte[] amplifyPcm16(byte[] bytes, float gain) {
+        if (bytes == null || bytes.length == 0 || gain <= 1.0f) return bytes;
+        byte[] out = new byte[bytes.length - (bytes.length % 2)];
+        for (int i = 0; i + 1 < out.length; i += 2) {
+            short sample = (short) ((bytes[i] & 0xff) | (bytes[i + 1] << 8));
+            int amplified = Math.round(sample * gain);
+            if (amplified > Short.MAX_VALUE) amplified = Short.MAX_VALUE;
+            if (amplified < Short.MIN_VALUE) amplified = Short.MIN_VALUE;
+            out[i] = (byte) (amplified & 0xff);
+            out[i + 1] = (byte) ((amplified >> 8) & 0xff);
+        }
+        return out;
+    }
+
+    private void resetVoiceprintGate() {
+        voiceprintRejectedThisTurn = false;
+        if (voiceprintStore != null && voiceprintStore.isEnabled()) {
+            voiceprintGate = new VoiceprintGate(voiceprintEngine, voiceprintStore.embedding());
+        } else {
+            voiceprintGate = VoiceprintGate.passthrough(voiceprintEngine);
+        }
+    }
+
+    private void updateLocalMicFeedback(byte[] bytes) {
+        int level = VoiceActivityDetector.averageAbsPcm16(bytes);
+        int visualLevel = Math.min(100, level / 45);
+        micInputFramesThisTurn++;
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastMicInputLogAt >= 1500) {
+            lastMicInputLogAt = now;
+            boolean gatePending = voiceprintGate != null && !voiceprintGate.isDecided();
+            Log.d(TAG, "mic input frame level=" + level
+                    + " visual=" + visualLevel
+                    + " frames=" + micInputFramesThisTurn
+                    + " realtimeOpen=" + realtime.isOpen()
+                    + " voiceprintPending=" + gatePending);
+        }
+        main.post(() -> {
+            if (!inputAudioOpen) return;
+            AudioLevelView levelView = audioLevelView;
+            VoiceOrbView orbView = voiceOrbView;
+            if (levelView != null) levelView.setLevel(visualLevel);
+            if (orbView != null) orbView.setLevel(visualLevel);
+        });
+    }
+
+    private List<byte[]> voiceprintFramesForRealtime(byte[] bytes) {
+        List<byte[]> empty = new ArrayList<>();
+        if (voiceprintGate == null) {
+            empty.add(bytes);
+            return empty;
+        }
+        VoiceprintGate.Result result = voiceprintGate.accept(bytes);
+        if (result.rejected) {
+            if (!voiceprintRejectedThisTurn) {
+                voiceprintRejectedThisTurn = true;
+                Log.d(TAG, "voiceprint rejected score=" + result.score);
+                main.post(() -> {
+                    if (!inputAudioOpen) return;
+                    toastError("声纹未通过，已暂停本轮语音。");
+                    stopInputAudio("ready");
+                });
+            }
+            return empty;
+        }
+        if (result.accepted && !result.frames.isEmpty() && result.score > 0) {
+            Log.d(TAG, "voiceprint accepted score=" + result.score);
+            voiceprintGate = null;
+        }
+        return result.frames;
     }
 
     private void processVad(byte[] bytes) {
@@ -3569,10 +4216,18 @@ public class MainActivity extends Activity {
     }
 
     private void startContinuousListening() {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "continuous listening blocked: app running active");
+            return;
+        }
         if (voiceInput != null) voiceInput.startContinuousListening();
     }
 
     private void scheduleContinuousListening(long delayMs) {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "schedule continuous listening blocked: app running active");
+            return;
+        }
         if (voiceInput != null) voiceInput.scheduleContinuousListening(delayMs);
     }
 
@@ -3622,6 +4277,11 @@ public class MainActivity extends Activity {
     }
 
     private void hangUpVoiceForSilence() {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "voice silence timeout ignored: app running active");
+            cancelVoiceSilenceTextModeTimeout();
+            return;
+        }
         Log.d(TAG, "voice silence timeout, switch to text mode");
         cancelScheduledContinuousListening();
         cancelAsrFinalTimeout();
@@ -3823,12 +4483,23 @@ public class MainActivity extends Activity {
     }
 
     private void setState(String next) {
+        String normalizedNext = VoiceSessionStatus.normalize(next);
+        if (isAppRunningSessionActive() && !VoiceSessionStatus.APP_RUNNING.legacyValue().equals(normalizedNext)) {
+            String appId = appRunningSession == null ? "app" : appRunningSession.appId();
+            Log.d(TAG, "state transition blocked by app running " + appId + ": " + state + " -> " + normalizedNext);
+            updateVoiceSilenceTextModeTimeout();
+            return;
+        }
         voiceState = VoiceSessionStateReducer.reduce(voiceState, next);
         state = voiceState.legacyValue();
         updateInteractionKeepScreenOn();
         updateResponsePendingTimeout(voiceState);
         if (stateLabel != null) stateLabel.setText(currentStateLabelText());
-        if (micButton != null) micButton.setText(voiceState.isListening() ? "●" : voiceButtonText());
+        if (micButton != null) {
+            micButton.setText(tabletDemoMode()
+                    ? (tabletDemoMicPaused ? "▶" : "Ⅱ")
+                    : (voiceState.isListening() ? "●" : voiceButtonText()));
+        }
         refreshTextModeAsrControls();
         if (voiceOrbView != null) voiceOrbView.setConversationState(voiceState);
         if (digitalAvatarView != null) digitalAvatarView.setAvatarState(avatarEmotion, voiceState.isSpeaking());
@@ -3896,6 +4567,7 @@ public class MainActivity extends Activity {
     }
 
     private String currentStateLabelText() {
+        if (tabletDemoMode() && tabletDemoMicPaused) return "Mic paused";
         if (isTextModeActive()) {
             if (textModeAsrStarting || textModeAsrRecording) return "Listening";
         }
@@ -3987,6 +4659,16 @@ public class MainActivity extends Activity {
         agents.loadVoices(DEFAULT_VOICE, loaded -> {
             voices.clear();
             voices.addAll(loaded);
+            if (tabletDemoMode()) {
+                String oldVoiceId = selectedVoiceId;
+                applyTabletDemoVoiceSelection();
+                if (!selectedVoiceId.equals(oldVoiceId) && realtime.isOpen()) {
+                    restartTabletDemoRealtimeForCharacterChange();
+                    if (voiceInputSurfaceActive && !isTextModeActive() && !tabletDemoMicPaused) {
+                        requestVoiceInputStart(true, "tablet_demo_voice_loaded", false);
+                    }
+                }
+            }
         });
     }
 
@@ -3996,6 +4678,22 @@ public class MainActivity extends Activity {
 
     private String readAgentMemory() {
         return readLocalFile(AGENT_MEMORY_FILE);
+    }
+
+    private String readTabletDemoAgentMd(TabletDemoCharacter character) {
+        if (character == null) return "";
+        try (InputStream stream = getAssets().open(character.agentAsset);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(stream))) {
+            StringBuilder builder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                builder.append(line).append('\n');
+            }
+            return builder.toString();
+        } catch (IOException error) {
+            Log.d(TAG, "tablet demo agent missing asset=" + character.agentAsset + " error=" + error.getMessage());
+            return "";
+        }
     }
 
     private String readLocalFile(String name) {
@@ -4099,6 +4797,9 @@ public class MainActivity extends Activity {
     }
 
     private String buildInstructions() {
+        if (tabletDemoMode()) {
+            return buildTabletDemoInstructions();
+        }
         if (initializing) {
             return ConversationInstructionsComposer.initialization(
                     agentName, initAgentNameCandidates, initUserTurns, INSTRUCTIONS, INIT_BASE_PROMPT);
@@ -4118,6 +4819,27 @@ public class MainActivity extends Activity {
                 isAwaitingRealtimeNewsAnswer(),
                 INSTRUCTIONS,
                 3900);
+    }
+
+    private String buildTabletDemoInstructions() {
+        String recent = recentDialogueForPrompt();
+        String toolBlocks = ConversationInstructionsComposer.toolPromptBlocks(
+                latestWeatherFact,
+                isAwaitingRealtimeWeatherAnswer(),
+                latestNewsFact,
+                isAwaitingRealtimeNewsAnswer());
+        return "你正在运行 404 Star 桌面 tablet 演示模式。\n" +
+                "当前演示角色：" + tabletDemoCharacter.label + "。\n" +
+                safePrompt(agentMemory) + "\n" +
+                safePrompt(INSTRUCTIONS) + "\n" +
+                "演示规则：不要进行首次初始化；不要询问用户关系；不要读取或声称拥有用户长期记忆；直接完成用户提出的问题或闲聊。\n" +
+                "回答适合语音播报，默认短一些；需要步骤时最多三点。\n" +
+                toolBlocks +
+                (recent.isEmpty() ? "" : "\n\n最近对话：\n" + trimForPrompt(recent, 1400));
+    }
+
+    private String safePrompt(String value) {
+        return value == null ? "" : value;
     }
 
     private String recentDialogueForPrompt() {
@@ -4268,18 +4990,31 @@ public class MainActivity extends Activity {
     private void handleRealtimeClosed() {
         cancelRealtimeOutputFinishDrain();
         releaseVoiceAudioRoute();
+        if (isAppRunningSessionActive()) {
+            resetRealtimeOutput();
+            Log.d(TAG, "realtime closed ignored: app running active");
+            return;
+        }
         if (realtimeClosedHandler != null) realtimeClosedHandler.onClosed();
     }
 
     private void retryRealtime(String reason) {
         cancelRealtimeOutputFinishDrain();
         releaseVoiceAudioRoute();
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "realtime retry ignored: app running active reason=" + reason);
+            return;
+        }
         if (realtimeRecovery != null) realtimeRecovery.retry(reason);
     }
 
     private void handleRealtimeTransportError(String message) {
         cancelRealtimeOutputFinishDrain();
         releaseVoiceAudioRoute();
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "realtime transport error ignored: app running active message=" + message);
+            return;
+        }
         if (realtimeRecovery != null) realtimeRecovery.onTransportError(message);
     }
 

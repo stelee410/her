@@ -21,23 +21,29 @@ final class MicStreamer {
 
     interface RecorderFactory {
         int minBufferSize();
-        Recorder create(int bufferSize, AudioDeviceInfo preferredDevice);
+        Recorder create(int bufferSize, AudioDeviceInfo preferredDevice, int audioSource);
         void enableEffects(int sessionId);
         void releaseEffects();
     }
 
     volatile boolean running = false;
     private final RecorderFactory recorderFactory;
+    private final AudioFrameProcessor audioProcessor;
     private Recorder recorder;
     private Thread thread;
     private boolean effectsActive;
 
     MicStreamer() {
-        this(new AndroidRecorderFactory());
+        this(new AndroidRecorderFactory(), new NoiseSuppressingAudioProcessor());
     }
 
     MicStreamer(RecorderFactory recorderFactory) {
+        this(recorderFactory, new NoiseSuppressingAudioProcessor());
+    }
+
+    MicStreamer(RecorderFactory recorderFactory, AudioFrameProcessor audioProcessor) {
         this.recorderFactory = recorderFactory;
+        this.audioProcessor = audioProcessor == null ? AudioFrameProcessor.NONE : audioProcessor;
     }
 
     boolean start(AudioSink sink) {
@@ -45,11 +51,20 @@ final class MicStreamer {
     }
 
     boolean start(AudioDeviceInfo preferredDevice, AudioSink sink) {
+        return start(preferredDevice, sink, MediaRecorder.AudioSource.VOICE_COMMUNICATION, true, true);
+    }
+
+    boolean startRawMic(AudioDeviceInfo preferredDevice, AudioSink sink) {
+        return start(preferredDevice, sink, MediaRecorder.AudioSource.VOICE_RECOGNITION, false, false);
+    }
+
+    private boolean start(AudioDeviceInfo preferredDevice, AudioSink sink, int audioSource,
+            boolean enableEffects, boolean processAudio) {
         if (running) return true;
         try {
             int min = recorderFactory.minBufferSize();
             int bufferSize = Math.max(min, 16000);
-            recorder = recorderFactory.create(bufferSize, preferredDevice);
+            recorder = recorderFactory.create(bufferSize, preferredDevice, audioSource);
         } catch (IllegalArgumentException | SecurityException error) {
             recorder = null;
             return false;
@@ -59,8 +74,10 @@ final class MicStreamer {
             recorder = null;
             return false;
         }
-        recorderFactory.enableEffects(recorder.audioSessionId());
-        effectsActive = true;
+        if (enableEffects) {
+            recorderFactory.enableEffects(recorder.audioSessionId());
+            effectsActive = true;
+        }
         running = true;
         try {
             recorder.startRecording();
@@ -70,6 +87,7 @@ final class MicStreamer {
             return false;
         }
         Recorder activeRecorder = recorder;
+        audioProcessor.reset();
         thread = new Thread(() -> {
             byte[] buffer = new byte[640];
             while (running) {
@@ -82,8 +100,10 @@ final class MicStreamer {
                     break;
                 }
                 if (read > 0) {
-                    byte[] out = new byte[read];
-                    System.arraycopy(buffer, 0, out, 0, read);
+                    byte[] out = processAudio
+                            ? audioProcessor.process(buffer, read)
+                            : AudioFrameProcessor.NONE.process(buffer, read);
+                    if (out.length == 0) continue;
                     sink.onAudio(out);
                 }
             }
@@ -121,9 +141,9 @@ final class MicStreamer {
         }
 
         @SuppressLint("MissingPermission")
-        @Override public Recorder create(int bufferSize, AudioDeviceInfo preferredDevice) {
+        @Override public Recorder create(int bufferSize, AudioDeviceInfo preferredDevice, int audioSource) {
             AudioRecord audioRecord = new AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    audioSource,
                     16000,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,

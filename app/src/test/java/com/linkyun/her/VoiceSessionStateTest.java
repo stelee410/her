@@ -41,6 +41,8 @@ public final class VoiceSessionStateTest {
                 .labelText(false, false, true, false, false));
         assertEquals("Checking weather", VoiceSessionState.fromLegacy("weather_tool")
                 .labelText(false, false, true, false, false));
+        assertEquals("App running", VoiceSessionState.fromLegacy("app_running")
+                .labelText(false, false, true, false, false));
         assertEquals("Summarizing", VoiceSessionState.fromLegacy("summarizing")
                 .labelText(false, false, false, true, false));
         assertEquals("Text only", VoiceSessionState.fromLegacy("text_only")
@@ -65,6 +67,7 @@ public final class VoiceSessionStateTest {
         assertTrue(VoiceSessionState.fromLegacy("speaking").shouldKeepScreenOn());
         assertTrue(VoiceSessionState.fromLegacy("news_tool").shouldKeepScreenOn());
         assertTrue(VoiceSessionState.fromLegacy("weather_tool").shouldKeepScreenOn());
+        assertTrue(VoiceSessionState.fromLegacy("app_running").shouldKeepScreenOn());
         assertFalse(VoiceSessionState.fromLegacy("ready").shouldKeepScreenOn());
         assertFalse(VoiceSessionState.fromLegacy("idle").shouldKeepScreenOn());
     }
@@ -75,6 +78,7 @@ public final class VoiceSessionStateTest {
         assertEquals("■", VoiceSessionState.fromLegacy("ready").voiceButtonText(false, true, false));
         assertEquals("■", VoiceSessionState.fromLegacy("news_tool").voiceButtonText(false, false, false));
         assertEquals("■", VoiceSessionState.fromLegacy("weather_tool").voiceButtonText(false, false, false));
+        assertEquals("■", VoiceSessionState.fromLegacy("app_running").voiceButtonText(false, false, false));
         assertEquals("■", VoiceSessionState.fromLegacy("ready").voiceButtonText(false, false, true));
         assertEquals("♩", VoiceSessionState.fromLegacy("ready").voiceButtonText(false, false, false));
     }

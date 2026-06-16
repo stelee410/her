@@ -18,6 +18,44 @@ val syncFullscreenAvatarAssets by tasks.registering(org.gradle.api.tasks.Copy::c
     into(layout.buildDirectory.dir("generated/fullscreen-avatar-assets"))
 }
 
+val syncTabletDemoAssets by tasks.registering(org.gradle.api.tasks.Sync::class) {
+    (1..5).forEach { index ->
+        val sourceDir = "assets/404 star/$index"
+        val targetDir = "tablet_demo/star_$index"
+        from(rootProject.layout.projectDirectory.file("$sourceDir/打招呼.mp4")) {
+            into(targetDir)
+            rename { "greeting.mp4" }
+        }
+        from(rootProject.layout.projectDirectory.file("$sourceDir/待机.mp4")) {
+            into(targetDir)
+            rename { "idle.mp4" }
+        }
+        from(rootProject.layout.projectDirectory.file("$sourceDir/说话.mp4")) {
+            into(targetDir)
+            rename { "speaking.mp4" }
+        }
+        from(rootProject.layout.projectDirectory.file("$sourceDir/agent.md")) {
+            into(targetDir)
+        }
+    }
+    from(rootProject.layout.projectDirectory.file("assets/jess/res/jess-smile.mp4")) {
+        into("tablet_demo/jess")
+        rename { "greeting.mp4" }
+    }
+    from(rootProject.layout.projectDirectory.file("assets/jess/res/jess-stay.mp4")) {
+        into("tablet_demo/jess")
+        rename { "idle.mp4" }
+    }
+    from(rootProject.layout.projectDirectory.file("assets/jess/res/jess-speak-loop.mp4")) {
+        into("tablet_demo/jess")
+        rename { "speaking.mp4" }
+    }
+    from(rootProject.layout.projectDirectory.file("assets/jess/agent.md")) {
+        into("tablet_demo/jess")
+    }
+    into(layout.buildDirectory.dir("generated/tablet-demo-assets"))
+}
+
 android {
     namespace = "com.linkyun.her"
     compileSdk = 35
@@ -51,10 +89,18 @@ android {
         create("phone") {
             dimension = "device"
             buildConfigField("boolean", "DIGITAL_AVATAR_ENABLED", "false")
+            buildConfigField("boolean", "TABLET_DEMO_MODE", "false")
         }
         create("tablet") {
             dimension = "device"
             buildConfigField("boolean", "DIGITAL_AVATAR_ENABLED", "true")
+            buildConfigField("boolean", "TABLET_DEMO_MODE", "false")
+        }
+        create("tabletDemo") {
+            dimension = "device"
+            applicationIdSuffix = ".tabletdemo"
+            buildConfigField("boolean", "DIGITAL_AVATAR_ENABLED", "true")
+            buildConfigField("boolean", "TABLET_DEMO_MODE", "true")
         }
     }
 
@@ -66,13 +112,21 @@ android {
         getByName("tablet") {
             assets.srcDir(layout.buildDirectory.dir("generated/fullscreen-avatar-assets"))
         }
+        getByName("tabletDemo") {
+            res.srcDir("src/tablet/res")
+            assets.srcDir(layout.buildDirectory.dir("generated/tablet-demo-assets"))
+        }
     }
 }
 
 tasks.matching { task ->
     task.name.startsWith("preTablet") && task.name.endsWith("Build")
 }.configureEach {
-    dependsOn(syncFullscreenAvatarAssets)
+    if (name.startsWith("preTabletDemo")) {
+        dependsOn(syncTabletDemoAssets)
+    } else {
+        dependsOn(syncFullscreenAvatarAssets)
+    }
 }
 
 dependencies {

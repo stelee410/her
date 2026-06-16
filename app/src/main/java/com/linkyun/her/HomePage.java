@@ -2,6 +2,7 @@ package com.linkyun.her;
 
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.FrameLayout;
@@ -75,7 +76,7 @@ final class HomePage {
         AssetVideoAvatarView assetVideoAvatarView = null;
         if (model.digitalAvatarEnabled) {
             if (assetsFullscreen) {
-                assetVideoAvatarView = new AssetVideoAvatarView(activity);
+                assetVideoAvatarView = new AssetVideoAvatarView(activity, model.tabletDemoCharacter);
                 assetVideoAvatarView.setSpeaking(model.avatarSpeaking);
                 root.addView(assetVideoAvatarView, ui.frame(-1, -1));
             } else {
@@ -92,7 +93,26 @@ final class HomePage {
 
         TextView voiceLastTurnView = null;
         TextView stateLabel = null;
-        if (!assetsFullscreen) {
+        if (assetsFullscreen && model.tabletDemoMode) {
+            voiceLastTurnView = ui.text(model.lastLine, 20, Color.WHITE, 0);
+            voiceLastTurnView.setGravity(Gravity.CENTER);
+            voiceLastTurnView.setLineSpacing(ui.dp(4), 1.0f);
+            voiceLastTurnView.setMaxLines(3);
+            voiceLastTurnView.setShadowLayer(ui.dp(4), 0, ui.dp(1), 0xCC000000);
+            voiceLastTurnView.setBackground(subtitleBackground(ui));
+            voiceLastTurnView.setPadding(ui.dp(22), ui.dp(10), ui.dp(22), ui.dp(10));
+            FrameLayout.LayoutParams lastParams = ui.frame(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            lastParams.leftMargin = ui.dp(22);
+            lastParams.rightMargin = ui.dp(22);
+            lastParams.bottomMargin = ui.dp(88);
+            root.addView(voiceLastTurnView, lastParams);
+
+            stateLabel = ui.text(model.stateLabel, 12, 0xB8FFFFFF, 0);
+            stateLabel.setGravity(Gravity.CENTER);
+            FrameLayout.LayoutParams stateParams = ui.frame(-1, ui.dp(28), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            stateParams.bottomMargin = ui.dp(66);
+            root.addView(stateLabel, stateParams);
+        } else if (!assetsFullscreen) {
             voiceLastTurnView = ui.text(model.lastLine, 22, Color.WHITE, 0);
             voiceLastTurnView.setGravity(Gravity.CENTER);
             voiceLastTurnView.setLineSpacing(ui.dp(4), 1.0f);
@@ -110,7 +130,14 @@ final class HomePage {
 
         AudioLevelView audioLevelView = null;
         TextView micButton = null;
-        if (!model.digitalAvatarEnabled) {
+        if (assetsFullscreen && model.tabletDemoMode) {
+            micButton = ui.text(model.demoMicPaused ? "▶" : "Ⅱ", 30, 0xFFFF6377, 0);
+            micButton.setGravity(Gravity.CENTER);
+            micButton.setOnClickListener(v -> callbacks.onToggleMic());
+            FrameLayout.LayoutParams micParams = ui.frame(ui.dp(78), ui.dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            micParams.bottomMargin = ui.dp(12);
+            root.addView(micButton, micParams);
+        } else if (!model.digitalAvatarEnabled) {
             audioLevelView = new AudioLevelView(activity);
             FrameLayout.LayoutParams levelParams = ui.frame(ui.dp(190), ui.dp(12), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
             levelParams.bottomMargin = ui.dp(94);
@@ -141,11 +168,20 @@ final class HomePage {
         }
 
         if (model.digitalAvatarEnabled) center.bringToFront();
+        if (voiceLastTurnView != null) voiceLastTurnView.bringToFront();
+        if (stateLabel != null) stateLabel.bringToFront();
         if (audioLevelView != null) audioLevelView.bringToFront();
         if (micButton != null) micButton.bringToFront();
         top.bringToFront();
         return new Views(root, rootState.moodVeil, voiceOrbView, digitalAvatarView, assetVideoAvatarView,
                 voiceLastTurnView, stateLabel, audioLevelView, micButton, null, null);
+    }
+
+    private static GradientDrawable subtitleBackground(HerUi ui) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(0x8C000000);
+        background.setCornerRadius(ui.dp(8));
+        return background;
     }
 
     interface Callbacks {
@@ -177,9 +213,19 @@ final class HomePage {
         final String avatarPlaybackMode;
         final boolean avatarSpeaking;
         final String avatarEmotion;
+        final boolean tabletDemoMode;
+        final boolean demoMicPaused;
+        final TabletDemoCharacter tabletDemoCharacter;
 
         VoiceModel(String lastLine, String stateLabel, int mood, WeatherTool.WeatherResult weather, NewsTool.NewsResult news,
                 boolean digitalAvatarEnabled, String avatarPlaybackMode, boolean avatarSpeaking, String avatarEmotion) {
+            this(lastLine, stateLabel, mood, weather, news, digitalAvatarEnabled, avatarPlaybackMode,
+                    avatarSpeaking, avatarEmotion, false, false, null);
+        }
+
+        VoiceModel(String lastLine, String stateLabel, int mood, WeatherTool.WeatherResult weather, NewsTool.NewsResult news,
+                boolean digitalAvatarEnabled, String avatarPlaybackMode, boolean avatarSpeaking, String avatarEmotion,
+                boolean tabletDemoMode, boolean demoMicPaused, TabletDemoCharacter tabletDemoCharacter) {
             this.lastLine = lastLine;
             this.stateLabel = stateLabel;
             this.mood = mood;
@@ -189,6 +235,9 @@ final class HomePage {
             this.avatarPlaybackMode = AvatarPlaybackMode.normalize(avatarPlaybackMode);
             this.avatarSpeaking = avatarSpeaking;
             this.avatarEmotion = avatarEmotion;
+            this.tabletDemoMode = tabletDemoMode;
+            this.demoMicPaused = demoMicPaused;
+            this.tabletDemoCharacter = tabletDemoCharacter;
         }
     }
 
