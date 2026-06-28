@@ -10,14 +10,17 @@ import org.junit.Test;
 
 public final class ToolRegistryTest {
     @Test
-    public void defaultsRegisterNewsWeatherAndBackgroundNews() {
+    public void defaultsRegisterNewsWeatherTvAndBackgroundTools() {
         ToolRegistry registry = ToolRegistry.defaults();
 
         assertEquals(VolumeToolDefinition.ID, registry.match("声音大一点").id());
+        assertEquals(TvToolDefinition.ID, registry.match("打开电视").id());
         assertEquals(NewsToolDefinition.ID, registry.match("查一下新闻").id());
         assertEquals(WeatherToolDefinition.ID, registry.match("深圳天气怎么样").id());
         assertEquals(NewsToolDefinition.ID, registry.backgroundTool("daily_news").id());
-        assertNull(registry.backgroundTool("weather"));
+        assertEquals(WeatherToolDefinition.ID, registry.backgroundTool("weather").id());
+        assertEquals(TvToolDefinition.ID, registry.backgroundTool("open_tv").id());
+        assertEquals(VolumeToolDefinition.ID, registry.backgroundTool("volume_up").id());
     }
 
     @Test

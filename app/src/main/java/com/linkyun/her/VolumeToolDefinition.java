@@ -2,6 +2,8 @@ package com.linkyun.her;
 
 final class VolumeToolDefinition implements ToolDefinition {
     static final String ID = "volume";
+    static final String LLM_TOOL_ID_UP = "volume_up";
+    static final String LLM_TOOL_ID_DOWN = "volume_down";
 
     @Override public String id() {
         return ID;
@@ -12,7 +14,7 @@ final class VolumeToolDefinition implements ToolDefinition {
     }
 
     @Override public boolean matchesBackgroundTool(String toolId) {
-        return false;
+        return LLM_TOOL_ID_UP.equals(toolId) || LLM_TOOL_ID_DOWN.equals(toolId);
     }
 
     @Override public boolean start(String question, boolean realtimeMode, ToolRouter.Host host) {
@@ -25,6 +27,6 @@ final class VolumeToolDefinition implements ToolDefinition {
     }
 
     @Override public boolean startFromBackground(String question, ToolRouter.Host host) {
-        return false;
+        return start(question, true, host);
     }
 }

@@ -31,8 +31,7 @@ public final class TextInputControllerTest {
         assertTrue(controller.sendText("  hello  "));
 
         assertEquals("user:hello", host.events.get(1));
-        assertEquals("route:hello:false", host.events.get(4));
-        assertEquals("chat:hello", host.events.get(5));
+        assertEquals("routeOrSend:hello", host.events.get(4));
     }
 
     @Test
@@ -46,19 +45,17 @@ public final class TextInputControllerTest {
         assertEquals("user:hello", host.events.get(1));
         assertEquals("clearAssistant", host.events.get(2));
         assertEquals("render", host.events.get(3));
-        assertEquals("route:hello:false", host.events.get(4));
-        assertEquals("chat:hello", host.events.get(5));
+        assertEquals("routeOrSend:hello", host.events.get(4));
     }
 
     @Test
     public void routedToolStopsBeforeTextChat() {
         Host host = new Host();
-        host.routeTool = true;
         TextInputController controller = new TextInputController(host);
 
         assertTrue(controller.sendText("查一下新闻"));
 
-        assertEquals("route:查一下新闻:false", host.events.get(4));
+        assertEquals("routeOrSend:查一下新闻", host.events.get(4));
         assertEquals(5, host.events.size());
     }
 
@@ -115,10 +112,7 @@ public final class TextInputControllerTest {
         @Override public void clearActiveAssistant() { events.add("clearAssistant"); }
         @Override public void renderMessages() { events.add("render"); }
         @Override public void finishInitializationWithSummary() { events.add("finishSummary"); }
-        @Override public boolean routeToolQuestion(String text, boolean realtimeMode) {
-            events.add("route:" + text + ":" + realtimeMode);
-            return routeTool;
-        }
+        @Override public void routeOrSendText(String text) { events.add("routeOrSend:" + text); }
         @Override public void sendTextWithAgentLLM(String text) { events.add("chat:" + text); }
     }
 }

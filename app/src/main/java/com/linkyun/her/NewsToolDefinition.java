@@ -2,7 +2,7 @@ package com.linkyun.her;
 
 final class NewsToolDefinition implements ToolDefinition {
     static final String ID = "news";
-    private static final String BACKGROUND_TOOL_ID = "daily_news";
+    static final String BACKGROUND_TOOL_ID = "daily_news";
 
     @Override public String id() {
         return ID;

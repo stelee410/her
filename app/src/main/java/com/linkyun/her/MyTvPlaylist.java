@@ -1,7 +1,6 @@
 package com.linkyun.her;
 
 import android.os.Environment;
-
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -36,6 +35,17 @@ final class MyTvPlaylist {
         return result;
     }
 
+    static List<TvChannel> channels() {
+        List<File> videos = videos();
+        List<TvChannel> channels = new ArrayList<>();
+        for (int i = 0; i < videos.size(); i++) {
+            File video = videos.get(i);
+            channels.add(new TvChannel("local-" + i, localTitle(video),
+                    "本地视频 · " + displayPath(), video.toURI().toString(), false));
+        }
+        return channels;
+    }
+
     static String displayPath() {
         return directory().getAbsolutePath();
     }
@@ -46,6 +56,12 @@ final class MyTvPlaylist {
             if (lower.endsWith(extension)) return true;
         }
         return false;
+    }
+
+    private static String localTitle(File file) {
+        String name = file == null ? "" : file.getName();
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
     }
 
     private static final Comparator<File> NATURAL_FILE_ORDER =

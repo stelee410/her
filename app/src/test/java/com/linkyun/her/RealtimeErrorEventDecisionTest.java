@@ -31,6 +31,18 @@ public final class RealtimeErrorEventDecisionTest {
     }
 
     @Test
+    public void realtimeUnavailableProviderErrorRetriesEvenWithoutRecoverableFlag() throws Exception {
+        JSONObject payload = new JSONObject();
+        payload.put("code", "realtime_unavailable");
+        payload.put("message", "Unexpected server response: 521");
+
+        RealtimeErrorEventDecision decision = RealtimeErrorEventDecision.fromPayload(payload);
+
+        assertEquals(RealtimeErrorEventDecision.Action.RETRY, decision.action);
+        assertEquals("Unexpected server response: 521", decision.message);
+    }
+
+    @Test
     public void missingOrBlankMessageUsesDefault() throws Exception {
         assertEquals("Realtime error", RealtimeErrorEventDecision.fromPayload(null).message);
 

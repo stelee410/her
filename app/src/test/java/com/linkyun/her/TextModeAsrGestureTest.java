@@ -13,15 +13,15 @@ public final class TextModeAsrGestureTest {
     }
 
     @Test
-    public void leftCancelsAndRightSends() {
+    public void upwardCancelsAndReleaseSendsByDefault() {
         assertEquals(TextModeAsrGesture.CANCEL, TextModeAsrGesture.decide(-60, 60));
-        assertEquals(TextModeAsrGesture.SEND, TextModeAsrGesture.decide(60, 60));
+        assertEquals(TextModeAsrGesture.NEUTRAL, TextModeAsrGesture.decide(60, 60));
     }
 
     @Test
     public void labelsExposeGestureState() {
-        assertEquals("← 取消    ▌ ▌ ▌", TextModeAsrGesture.label(TextModeAsrGesture.CANCEL));
-        assertEquals("▌ ▌ ▌    发送 →", TextModeAsrGesture.label(TextModeAsrGesture.SEND));
-        assertEquals("← 取消    ▌ ▌ ▌    发送 →", TextModeAsrGesture.label(TextModeAsrGesture.NEUTRAL));
+        assertEquals("松手取消", TextModeAsrGesture.label(TextModeAsrGesture.CANCEL));
+        assertEquals("松开发送", TextModeAsrGesture.label(TextModeAsrGesture.SEND));
+        assertEquals("松开发送    上滑取消", TextModeAsrGesture.label(TextModeAsrGesture.NEUTRAL));
     }
 }

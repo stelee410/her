@@ -43,6 +43,16 @@ public final class ToolRouterTest {
     }
 
     @Test
+    public void routesTvCommands() {
+        Host host = new Host();
+        ToolRouter router = new ToolRouter(ToolRegistry.defaults(), host);
+
+        assertTrue(router.routeUserText("帮我打开电视台", false));
+
+        assertEquals("tv:帮我打开电视台:false", host.events.get(1));
+    }
+
+    @Test
     public void trimsUserTextBeforeRouting() {
         Host host = new Host();
         ToolRouter router = new ToolRouter(ToolRegistry.defaults(), host);
@@ -102,10 +112,22 @@ public final class ToolRouterTest {
         ToolRouter router = new ToolRouter(ToolRegistry.defaults(), host);
 
         assertFalse(router.routeBackgroundDecision("daily_news", 0.54, "新闻"));
-        assertFalse(router.routeBackgroundDecision("weather", 0.99, "天气"));
+        assertFalse(router.routeBackgroundDecision("missing_tool", 0.99, "天气"));
         assertTrue(router.routeBackgroundDecision("daily_news", 0.55, "新闻"));
 
         assertEquals("backgroundNews:新闻", host.events.get(1));
+    }
+
+    @Test
+    public void llmDecisionRoutesForegroundTools() {
+        Host host = new Host();
+        ToolRouter router = new ToolRouter(ToolRegistry.defaults(), host);
+
+        assertTrue(router.routeLlmDecision("open_tv", 0.9, "找个视频看看", false));
+        assertTrue(router.routeLlmDecision("weather", 0.9, "今天适合出门吗", false));
+
+        assertEquals("tv:找个视频看看:false", host.events.get(1));
+        assertEquals("weather:今天适合出门吗:false", host.events.get(3));
     }
 
     @Test
@@ -155,6 +177,10 @@ public final class ToolRouterTest {
 
         @Override public void adjustVoiceVolume(VolumeSkill.Direction direction) {
             events.add("volume:" + direction);
+        }
+
+        @Override public void openTv(String question, boolean realtimeMode) {
+            events.add("tv:" + question + ":" + realtimeMode);
         }
 
         @Override public void logToolRoute(String message) {

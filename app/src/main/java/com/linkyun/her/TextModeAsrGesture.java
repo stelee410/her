@@ -7,15 +7,14 @@ final class TextModeAsrGesture {
 
     private TextModeAsrGesture() { }
 
-    static int decide(float deltaX, float thresholdPx) {
-        if (deltaX <= -thresholdPx) return CANCEL;
-        if (deltaX >= thresholdPx) return SEND;
+    static int decide(float deltaY, float thresholdPx) {
+        if (deltaY <= -thresholdPx) return CANCEL;
         return NEUTRAL;
     }
 
     static String label(int state) {
-        if (state == CANCEL) return "← 取消    ▌ ▌ ▌";
-        if (state == SEND) return "▌ ▌ ▌    发送 →";
-        return "← 取消    ▌ ▌ ▌    发送 →";
+        if (state == CANCEL) return "松手取消";
+        if (state == SEND) return "松开发送";
+        return "松开发送    上滑取消";
     }
 }

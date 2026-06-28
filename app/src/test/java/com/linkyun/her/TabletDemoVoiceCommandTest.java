@@ -46,7 +46,21 @@ public final class TabletDemoVoiceCommandTest {
                 TabletDemoVoiceCommand.normalize("切到杰西卡")));
         assertTrue(TabletDemoVoiceCommand.shouldShowHiddenJess(
                 TabletDemoVoiceCommand.normalize("隐藏人物")));
+        assertTrue(TabletDemoVoiceCommand.shouldShowHiddenJess(
+                TabletDemoVoiceCommand.normalize("打开我的秘密")));
         assertFalse(TabletDemoVoiceCommand.shouldShowHiddenJess(
+                TabletDemoVoiceCommand.normalize("换一个人")));
+    }
+
+    @Test
+    public void detectsNfcIdentityRegistrationCommands() {
+        assertTrue(TabletDemoVoiceCommand.shouldRegisterIdentity(
+                TabletDemoVoiceCommand.normalize("登记身份")));
+        assertTrue(TabletDemoVoiceCommand.shouldRegisterIdentity(
+                TabletDemoVoiceCommand.normalize("帮我绑定这张卡。")));
+        assertTrue(TabletDemoVoiceCommand.shouldRegisterIdentity(
+                TabletDemoVoiceCommand.normalize("录入身份")));
+        assertFalse(TabletDemoVoiceCommand.shouldRegisterIdentity(
                 TabletDemoVoiceCommand.normalize("换一个人")));
     }
 }

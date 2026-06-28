@@ -22,6 +22,9 @@ public final class BackgroundToolRouteDeciderTest {
         assertEquals("system", messages.getJSONObject(0).getString("role"));
         assertTrue(messages.getJSONObject(0).getString("content").contains("你是 Luna 的后台意识模型"));
         assertTrue(messages.getJSONObject(0).getString("content").contains("daily_news"));
+        assertTrue(messages.getJSONObject(0).getString("content").contains("weather"));
+        assertTrue(messages.getJSONObject(0).getString("content").contains("open_tv"));
+        assertTrue(messages.getJSONObject(0).getString("content").contains("volume_up"));
         assertTrue(messages.getJSONObject(0).getString("content").contains("只输出 JSON，不要解释"));
         assertEquals("user", messages.getJSONObject(1).getString("role"));
         assertEquals("看看今天新闻", messages.getJSONObject(1).getString("content"));

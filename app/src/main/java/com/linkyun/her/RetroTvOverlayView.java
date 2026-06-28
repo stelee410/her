@@ -14,9 +14,14 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import android.widget.VideoView;
 
-import java.io.File;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.ui.AspectRatioFrameLayout;
+import androidx.media3.ui.PlayerView;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -34,7 +39,8 @@ final class RetroTvOverlayView extends FrameLayout {
     private final LinearLayout header;
     private final FrameLayout screen;
     private final LinearLayout controls;
-    private final VideoView videoView;
+    private final PlayerView playerView;
+    private final ExoPlayer player;
     private final View scanlines;
     private final LinearLayout channelBug;
     private final FrameLayout startupView;
@@ -45,7 +51,7 @@ final class RetroTvOverlayView extends FrameLayout {
     private final TextView fullButton;
     private TextView channelNameView;
     private TextView channelSubView;
-    private final List<File> playlist = new ArrayList<>();
+    private final List<TvChannel> playlist = new ArrayList<>();
     private Runnable startupRunnable;
     private int index;
     private float touchDownX;
@@ -80,8 +86,13 @@ final class RetroTvOverlayView extends FrameLayout {
         screen = new FrameLayout(context);
         body.addView(screen);
 
-        videoView = new VideoView(context);
-        screen.addView(videoView, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        player = new ExoPlayer.Builder(context).build();
+        playerView = new PlayerView(context);
+        playerView.setUseController(false);
+        playerView.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_ZOOM);
+        playerView.setKeepContentOnPlayerReset(true);
+        playerView.setPlayer(player);
+        screen.addView(playerView, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         scanlines = new ScanlineView(context);
         screen.addView(scanlines, new FrameLayout.LayoutParams(-1, -1));
 
@@ -120,36 +131,42 @@ final class RetroTvOverlayView extends FrameLayout {
         });
         View.OnTouchListener fullscreenSwipeListener = (view, event) -> handleFullscreenSwipe(event);
         screen.setOnTouchListener(fullscreenSwipeListener);
-        videoView.setOnTouchListener(fullscreenSwipeListener);
-        videoView.setOnCompletionListener(mp -> playNext());
-        videoView.setOnPreparedListener(mp -> {
-            if (!userPaused) {
-                videoView.start();
-                playPauseButton.setText("PAUSE");
+        playerView.setOnTouchListener(fullscreenSwipeListener);
+        player.addListener(new Player.Listener() {
+            @Override public void onPlaybackStateChanged(int playbackState) {
+                if (playbackState == Player.STATE_ENDED) {
+                    playNext();
+                } else if (playbackState == Player.STATE_READY && !userPaused) {
+                    playPauseButton.setText("PAUSE");
+                } else if (playbackState == Player.STATE_BUFFERING) {
+                    counterView.setText("BUFFER");
+                }
             }
-        });
-        videoView.setOnErrorListener((mp, what, extra) -> {
-            playNext();
-            return true;
+
+            @Override public void onPlayerError(PlaybackException error) {
+                post(() -> {
+                    if (playlist.size() > 1) playNext();
+                    else showEmpty("频道暂时没有信号\n" + error.getErrorCodeName());
+                });
+            }
         });
         applyTvFrameLayout();
     }
 
-    void show(List<File> videos) {
+    void show(List<TvChannel> channels) {
         removeStartupCallback();
         playlist.clear();
-        if (videos != null) playlist.addAll(videos);
+        if (channels != null) playlist.addAll(channels);
         userPaused = false;
         setVisibility(VISIBLE);
         if (playlist.isEmpty()) {
-            videoView.stopPlayback();
+            player.stop();
             titleView.setText("MYTV");
             counterView.setText("NO SIGNAL");
             playPauseButton.setText("PLAY");
             channelBug.setVisibility(GONE);
             startupView.setVisibility(GONE);
-            emptyView.setText("把视频放到 " + MyTvPlaylist.displayPath() + "\n支持 mp4 / m4v / 3gp / webm / mkv");
-            emptyView.setVisibility(VISIBLE);
+            showEmpty("没有可用的线上频道\n也可以把视频放到 " + MyTvPlaylist.displayPath());
             return;
         }
         emptyView.setVisibility(GONE);
@@ -170,7 +187,9 @@ final class RetroTvOverlayView extends FrameLayout {
 
     void dismiss() {
         removeStartupCallback();
-        videoView.stopPlayback();
+        player.stop();
+        player.clearMediaItems();
+        player.release();
         if (getParent() instanceof FrameLayout) {
             ((FrameLayout) getParent()).removeView(this);
         }
@@ -179,14 +198,15 @@ final class RetroTvOverlayView extends FrameLayout {
 
     private void playCurrent() {
         if (playlist.isEmpty()) return;
-        File file = playlist.get(index);
-        titleView.setText("MYTV " + twoDigits(index + 1));
-        counterView.setText((index + 1) + "/" + playlist.size());
+        TvChannel channel = playlist.get(index);
+        titleView.setText("MYTV " + twoDigits(index + 1) + " · " + channel.title);
+        counterView.setText(channel.live ? "LIVE" : (index + 1) + "/" + playlist.size());
         playPauseButton.setText("PAUSE");
         channelBug.setVisibility(VISIBLE);
         updateChannelBugMode();
-        videoView.setVideoPath(file.getAbsolutePath());
-        videoView.start();
+        player.setMediaItem(MediaItem.fromUri(channel.uri));
+        player.setPlayWhenReady(!userPaused);
+        player.prepare();
     }
 
     private void playNext() {
@@ -229,15 +249,20 @@ final class RetroTvOverlayView extends FrameLayout {
 
     private void togglePlayback() {
         if (playlist.isEmpty()) return;
-        if (videoView.isPlaying()) {
+        if (player.isPlaying()) {
             userPaused = true;
-            videoView.pause();
+            player.pause();
             playPauseButton.setText("PLAY");
         } else {
             userPaused = false;
-            videoView.start();
+            player.play();
             playPauseButton.setText("PAUSE");
         }
+    }
+
+    private void showEmpty(String text) {
+        emptyView.setText(text);
+        emptyView.setVisibility(VISIBLE);
     }
 
     private void setFullScreen(boolean enabled) {
@@ -262,13 +287,22 @@ final class RetroTvOverlayView extends FrameLayout {
         params.topMargin = ui.dp(fullScreen ? 18 : 14);
         channelBug.setLayoutParams(params);
         if (channelNameView != null) {
-            channelNameView.setText("美亚电视");
+            channelNameView.setText("AI TV");
             channelNameView.setTextSize(fullScreen ? 16 : 14);
         }
         if (channelSubView != null) {
-            channelSubView.setText(fullScreen ? "AI TV · 上下滑动换台" : "AI TV");
+            channelSubView.setText(currentChannelSubtitle(fullScreen));
             channelSubView.setTextSize(fullScreen ? 9 : 9);
         }
+    }
+
+    private String currentChannelSubtitle(boolean fullscreen) {
+        if (playlist.isEmpty()) return fullscreen ? "上下滑动换台" : "NO SIGNAL";
+        TvChannel channel = playlist.get(index);
+        String label = channel.title;
+        if (channel.live) label += " · LIVE";
+        else if (!channel.subtitle.isEmpty()) label += " · " + channel.subtitle;
+        return fullscreen ? label + " · 上下滑动换台" : label;
     }
 
     private void applyTvFrameLayout() {
@@ -341,10 +375,10 @@ final class RetroTvOverlayView extends FrameLayout {
         bug.setOrientation(LinearLayout.VERTICAL);
         bug.setGravity(Gravity.CENTER);
         bug.setBackground(new ChannelBugDrawable(ui.dp(5)));
-        channelNameView = label("美亚电视", 14, 0xFFF8D985, true);
+        channelNameView = label("AI TV", 14, 0xFFF8D985, true);
         channelNameView.setGravity(Gravity.CENTER);
         channelNameView.setIncludeFontPadding(false);
-        channelSubView = label("AI TV", 9, 0xFF7EF6F0, true);
+        channelSubView = label("NO SIGNAL", 9, 0xFF7EF6F0, true);
         channelSubView.setGravity(Gravity.CENTER);
         channelSubView.setIncludeFontPadding(false);
         bug.addView(channelNameView, new LinearLayout.LayoutParams(-1, 0, 1.25f));

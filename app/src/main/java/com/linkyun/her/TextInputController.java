@@ -12,7 +12,7 @@ final class TextInputController {
         void clearActiveAssistant();
         void renderMessages();
         void finishInitializationWithSummary();
-        boolean routeToolQuestion(String text, boolean realtimeMode);
+        void routeOrSendText(String text);
         void sendTextWithAgentLLM(String text);
     }
 
@@ -38,8 +38,11 @@ final class TextInputController {
         }
         host.clearActiveAssistant();
         host.renderMessages();
-        if (!host.isInitializing() && host.routeToolQuestion(clean, false)) return true;
-        host.sendTextWithAgentLLM(clean);
+        if (!host.isInitializing()) {
+            host.routeOrSendText(clean);
+        } else {
+            host.sendTextWithAgentLLM(clean);
+        }
         return true;
     }
 }

@@ -1,6 +1,7 @@
 package com.linkyun.her;
 
 import android.os.Handler;
+import android.os.SystemClock;
 import android.util.Log;
 
 import org.json.JSONException;
@@ -41,6 +42,8 @@ final class TextModeAsrClient extends WebSocketListener {
     private boolean finishSent;
     private String latestText = "";
     private String finalText = "";
+    private long startedAtMs;
+    private long finishSentAtMs;
 
     TextModeAsrClient(String tag, Handler main, String baseUrl, String apiKey) {
         this.tag = tag;
@@ -68,7 +71,10 @@ final class TextModeAsrClient extends WebSocketListener {
         finishSent = false;
         latestText = "";
         finalText = "";
+        startedAtMs = SystemClock.elapsedRealtime();
+        finishSentAtMs = 0;
         generation = callbackGate.nextGeneration();
+        Log.i(tag, "text asr start task=" + taskId);
         Request request = new Request.Builder()
                 .url(wsUrl(baseUrl, apiKey))
                 .build();
@@ -85,6 +91,8 @@ final class TextModeAsrClient extends WebSocketListener {
     void finish() {
         if (socket == null || finishSent) return;
         finishSent = true;
+        finishSentAtMs = SystemClock.elapsedRealtime();
+        Log.i(tag, "text asr finish sent elapsedMs=" + elapsedSinceStart());
         try {
             socket.send(TextModeAsrEvent.finishTask(taskId).toString());
         } catch (JSONException error) {
@@ -125,6 +133,7 @@ final class TextModeAsrClient extends WebSocketListener {
             Log.d(tag, "text asr event " + event.optJSONObject("header"));
             if (TextModeAsrEvent.isTaskStarted(event)) {
                 taskStarted = true;
+                Log.i(tag, "text asr task started elapsedMs=" + elapsedSinceStart());
                 postIfCurrent(webSocket, activeGeneration, () -> {
                     if (listener != null) listener.onStarted();
                 });
@@ -133,11 +142,19 @@ final class TextModeAsrClient extends WebSocketListener {
             if (TextModeAsrEvent.isResultGenerated(event)) {
                 String sentence = TextModeAsrEvent.sentenceText(event);
                 if (!sentence.isEmpty()) latestText = sentence;
-                if (TextModeAsrEvent.isFinalSentence(event)) finalText = latestText;
+                if (TextModeAsrEvent.isFinalSentence(event)) {
+                    finalText = latestText;
+                    Log.i(tag, "text asr final sentence elapsedMs=" + elapsedSinceStart()
+                            + " afterFinishMs=" + elapsedSinceFinish()
+                            + " chars=" + finalText.length());
+                }
                 return;
             }
             if (TextModeAsrEvent.isTaskFinished(event)) {
                 String result = finalText.isEmpty() ? latestText : finalText;
+                Log.i(tag, "text asr task finished elapsedMs=" + elapsedSinceStart()
+                        + " afterFinishMs=" + elapsedSinceFinish()
+                        + " chars=" + result.length());
                 postIfGeneration(activeGeneration, () -> {
                     if (listener != null) listener.onFinalText(result);
                 });
@@ -152,6 +169,8 @@ final class TextModeAsrClient extends WebSocketListener {
         if (webSocket != socket) return;
         int activeGeneration = generation;
         closeIfOwned(webSocket);
+        Log.i(tag, "text asr failure elapsedMs=" + elapsedSinceStart()
+                + " message=" + (error.getMessage() == null ? "" : error.getMessage()));
         postError(activeGeneration, error.getMessage() == null ? "ASR failed" : error.getMessage());
     }
 
@@ -159,6 +178,8 @@ final class TextModeAsrClient extends WebSocketListener {
         if (webSocket != socket) return;
         int activeGeneration = generation;
         closeIfOwned(webSocket);
+        Log.i(tag, "text asr closed elapsedMs=" + elapsedSinceStart()
+                + " code=" + code + " reason=" + reason);
         postIfGeneration(activeGeneration, () -> {
             if (listener != null) listener.onClosed();
         });
@@ -170,6 +191,14 @@ final class TextModeAsrClient extends WebSocketListener {
             taskStarted = false;
             finishSent = false;
         }
+    }
+
+    private long elapsedSinceStart() {
+        return startedAtMs == 0 ? 0 : SystemClock.elapsedRealtime() - startedAtMs;
+    }
+
+    private long elapsedSinceFinish() {
+        return finishSentAtMs == 0 ? 0 : SystemClock.elapsedRealtime() - finishSentAtMs;
     }
 
     private void postError(int activeGeneration, String message) {

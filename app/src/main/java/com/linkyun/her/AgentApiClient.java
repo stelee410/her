@@ -1,6 +1,8 @@
 package com.linkyun.her;
 
 import android.os.Handler;
+import android.os.SystemClock;
+import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -19,6 +21,21 @@ import okhttp3.RequestBody;
 import okhttp3.Response;
 
 final class AgentApiClient {
+    private static final String TAG = "HerRealtime";
+    private static final String[] UNSUPPORTED_REALTIME_VOICES = {
+            "zh_female_roumeinvyou_emo_v2_mars_bigtts",
+            "zh_female_tianxinxiaomei_emo_v2_mars_bigtts",
+            "zh_female_gaolengyujie_emo_v2_mars_bigtts",
+            "zh_male_aojiaobazong_emo_v2_mars_bigtts",
+            "zh_male_junlangnanyou_emo_v2_mars_bigtts",
+            "zh_male_ruyayichen_emo_v2_mars_bigtts",
+            "zh_male_jingqiangkanye_emo_mars_bigtts",
+            "zh_male_guangzhoudege_emo_mars_bigtts",
+            "zh_female_linjuayi_emo_v2_mars_bigtts",
+            "zh_male_yourougongzi_emo_v2_mars_bigtts",
+            "zh_male_zhoujielun_emo_v2_mars_bigtts"
+    };
+
     interface ReplyCallback {
         void onSuccess(String content);
         void onError(String message);
@@ -79,6 +96,7 @@ final class AgentApiClient {
                     for (int i = 0; i < array.length(); i++) {
                         JSONObject item = array.getJSONObject(i);
                         String id = item.optString("id");
+                        if (!isRealtimeSupportedVoiceId(id)) continue;
                         String label = id.equals(defaultVoice) ? "Doris Clone" : item.optString("label", id);
                         loaded.add(new Voice(id, label, item.optString("gender", "voice")));
                     }
@@ -89,7 +107,17 @@ final class AgentApiClient {
         });
     }
 
+    static boolean isRealtimeSupportedVoiceId(String id) {
+        if (id == null || id.trim().isEmpty()) return false;
+        for (String unsupported : UNSUPPORTED_REALTIME_VOICES) {
+            if (unsupported.equals(id)) return false;
+        }
+        return true;
+    }
+
     private void enqueueChat(JSONObject body, ReplyCallback callback, String label) {
+        long startedAtMs = SystemClock.elapsedRealtime();
+        String model = body.optString("model", "");
         Request request = new Request.Builder()
                 .url(BuildConfig.AGENTLLM_BASE_URL + "/v1/chat/completions")
                 .header("Authorization", "Bearer " + BuildConfig.AGENTLLM_API_KEY)
@@ -99,23 +127,45 @@ final class AgentApiClient {
 
         http.newCall(request).enqueue(new Callback() {
             @Override public void onFailure(Call call, IOException error) {
+                Log.i(TAG, "agent chat failed label=" + label
+                        + " model=" + model
+                        + " elapsedMs=" + elapsedSince(startedAtMs)
+                        + " message=" + error.getMessage());
                 main.post(() -> callback.onError(label + "失败：" + error.getMessage()));
             }
 
             @Override public void onResponse(Call call, Response response) throws IOException {
                 String responseText = response.body() == null ? "" : response.body().string();
+                long elapsedMs = elapsedSince(startedAtMs);
                 if (!response.isSuccessful()) {
+                    Log.i(TAG, "agent chat http failed label=" + label
+                            + " model=" + model
+                            + " code=" + response.code()
+                            + " elapsedMs=" + elapsedMs
+                            + " bytes=" + responseText.length());
                     main.post(() -> callback.onError(label + "接口失败：" + response.code()));
                     return;
                 }
                 try {
                     String reply = extractAssistantContent(responseText).trim();
+                    Log.i(TAG, "agent chat completed label=" + label
+                            + " model=" + model
+                            + " elapsedMs=" + elapsedMs
+                            + " replyChars=" + reply.length());
                     main.post(() -> callback.onSuccess(reply));
                 } catch (JSONException error) {
+                    Log.i(TAG, "agent chat parse failed label=" + label
+                            + " model=" + model
+                            + " elapsedMs=" + elapsedMs
+                            + " bytes=" + responseText.length());
                     main.post(() -> callback.onError("解析" + label + "回复失败"));
                 }
             }
         });
+    }
+
+    private static long elapsedSince(long startedAtMs) {
+        return SystemClock.elapsedRealtime() - startedAtMs;
     }
 
     static String extractAssistantContent(String responseText) throws JSONException {

@@ -8,6 +8,7 @@ final class ToolRouter {
         void startNewsFromBackground(String question);
         void startWeather(String question, boolean realtimeMode);
         void adjustVoiceVolume(VolumeSkill.Direction direction);
+        void openTv(String question, boolean realtimeMode);
         void logToolRoute(String message);
     }
 
@@ -42,6 +43,15 @@ final class ToolRouter {
         ToolDefinition tool = registry.backgroundTool(toolId);
         if (tool == null) return false;
         return tool.startFromBackground(question, host);
+    }
+
+    boolean routeLlmDecision(String toolId, double confidence, String text, boolean realtimeMode) {
+        if (confidence < BACKGROUND_CONFIDENCE_THRESHOLD) return false;
+        String question = normalizeQuestion(text);
+        if (question.isEmpty()) return false;
+        ToolDefinition tool = registry.backgroundTool(toolId);
+        if (tool == null) return false;
+        return tool.start(question, realtimeMode, host);
     }
 
     private static String normalizeQuestion(String text) {

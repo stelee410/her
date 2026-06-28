@@ -4,13 +4,18 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.FrameLayout;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 final class HomePage {
     static Views renderLanding(MainActivity activity, HerUi ui, LandingModel model, Callbacks callbacks) {
+        if (model.jessAvatarHome) {
+            return renderJessLanding(activity, ui, model, callbacks);
+        }
         HerUi.Root rootState = ui.baseRoot(model.mood);
         FrameLayout root = rootState.frame;
         LinearLayout top = ui.topBar("☰", "", "Aa", callbacks::onSettings, callbacks::onChat);
@@ -54,6 +59,105 @@ final class HomePage {
 
         top.bringToFront();
         return new Views(root, rootState.moodVeil, null, null, null, null, null, null, null, homeTimeView, handwrittenNameView);
+    }
+
+    private static Views renderJessLanding(MainActivity activity, HerUi ui, LandingModel model, Callbacks callbacks) {
+        HerUi.Root rootState = ui.baseRoot(model.mood);
+        FrameLayout root = rootState.frame;
+
+        AssetVideoAvatarView avatarView = new AssetVideoAvatarView(
+                activity, TabletDemoCharacterCatalog.hiddenJess(), ui.dp(76));
+        avatarView.setSpeaking(model.avatarSpeaking);
+        root.addView(avatarView, ui.frame(-1, -1));
+
+        LinearLayout top = ui.topBar("☰", "", "Aa", callbacks::onSettings, callbacks::onChat);
+        root.addView(top);
+        ImageButton call = phoneButton(activity, ui, callbacks::onVoiceHome);
+        FrameLayout.LayoutParams callParams = ui.frame(ui.dp(54), ui.dp(54), Gravity.TOP | Gravity.RIGHT);
+        callParams.topMargin = ui.dp(84);
+        callParams.rightMargin = ui.dp(22);
+        root.addView(call, callParams);
+
+        LinearLayout dialogue = new LinearLayout(activity);
+        dialogue.setOrientation(LinearLayout.VERTICAL);
+        dialogue.setGravity(Gravity.CENTER);
+        dialogue.setPadding(ui.dp(18), ui.dp(12), ui.dp(18), ui.dp(12));
+        dialogue.setBackground(subtitleBackground(ui));
+        TextView lastLine = ui.text(model.lastLine, 18, Color.WHITE, 0);
+        lastLine.setGravity(Gravity.CENTER);
+        lastLine.setMaxLines(3);
+        lastLine.setLineSpacing(ui.dp(3), 1.0f);
+        lastLine.setShadowLayer(ui.dp(3), 0, ui.dp(1), 0x99000000);
+        dialogue.addView(lastLine, new LinearLayout.LayoutParams(-1, -2));
+        TextView stateLabel = ui.text(model.stateLabel, 11, 0xB8FFFFFF, 0);
+        stateLabel.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams stateInDialogue = new LinearLayout.LayoutParams(-1, -2);
+        stateInDialogue.topMargin = ui.dp(6);
+        dialogue.addView(stateLabel, stateInDialogue);
+        FrameLayout.LayoutParams dialogueParams = ui.frame(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        dialogueParams.leftMargin = ui.dp(18);
+        dialogueParams.rightMargin = ui.dp(18);
+        dialogueParams.bottomMargin = ui.dp(172);
+        root.addView(dialogue, dialogueParams);
+
+        TextView asrHint = ui.text(TextModeAsrGesture.label(TextModeAsrGesture.NEUTRAL), 15, 0xCCFFFFFF, 0);
+        asrHint.setGravity(Gravity.CENTER);
+        asrHint.setVisibility(model.asrListening ? View.VISIBLE : View.GONE);
+        FrameLayout.LayoutParams hintParams = ui.frame(-1, ui.dp(32), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        hintParams.bottomMargin = ui.dp(124);
+        root.addView(asrHint, hintParams);
+
+        View contentCard = null;
+        if (model.weather != null) {
+            contentCard = WeatherCard.voice(activity, ui, model.weather);
+        } else if (model.news != null) {
+            contentCard = NewsCard.voice(activity, ui, model.news);
+        }
+        if (contentCard != null) {
+            FrameLayout.LayoutParams cardParams = ui.frame(-1, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+            cardParams.leftMargin = ui.dp(18);
+            cardParams.rightMargin = ui.dp(18);
+            cardParams.topMargin = ui.dp(146);
+            root.addView(contentCard, cardParams);
+        }
+
+        ImageButton asr = new ImageButton(activity);
+        asr.setImageResource(model.asrListening ? R.drawable.ic_stop_text_input : R.drawable.ic_mic_text_input);
+        asr.setColorFilter(0xFFFFFFFF);
+        asr.setBackground(controlBackground(ui, 0xAAFF6377, 999));
+        asr.setPadding(ui.dp(24), ui.dp(24), ui.dp(24), ui.dp(24));
+        asr.setContentDescription("按住说话");
+        asr.setOnTouchListener((v, event) -> {
+            switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                callbacks.onAsrPressStart(event.getRawY());
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                callbacks.onAsrPressMove(event.getRawY());
+                return true;
+            case MotionEvent.ACTION_UP:
+                v.performClick();
+                callbacks.onAsrPressEnd(event.getRawY());
+                return true;
+            case MotionEvent.ACTION_CANCEL:
+                callbacks.onAsrPressCancel();
+                return true;
+            default:
+                return true;
+            }
+        });
+        FrameLayout.LayoutParams asrParams = ui.frame(ui.dp(94), ui.dp(94), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        asrParams.bottomMargin = ui.dp(20);
+        root.addView(asr, asrParams);
+
+        top.bringToFront();
+        call.bringToFront();
+        if (contentCard != null) contentCard.bringToFront();
+        dialogue.bringToFront();
+        asrHint.bringToFront();
+        asr.bringToFront();
+        return new Views(root, rootState.moodVeil, null, null, avatarView,
+                lastLine, stateLabel, null, null, null, null, asr, asrHint);
     }
 
     static Views renderVoice(MainActivity activity, HerUi ui, VoiceModel model, Callbacks callbacks) {
@@ -130,6 +234,15 @@ final class HomePage {
 
         AudioLevelView audioLevelView = null;
         TextView micButton = null;
+        TextView hangUpButton = ui.text("挂断", 15, Color.WHITE, 700);
+        hangUpButton.setGravity(Gravity.CENTER);
+        hangUpButton.setBackground(controlBackground(ui, 0xCCB3263A, 22));
+        hangUpButton.setOnClickListener(v -> callbacks.onHangUp());
+        FrameLayout.LayoutParams hangUpParams = ui.frame(ui.dp(94), ui.dp(52),
+                Gravity.BOTTOM | Gravity.RIGHT);
+        hangUpParams.rightMargin = ui.dp(28);
+        hangUpParams.bottomMargin = ui.dp(20);
+        root.addView(hangUpButton, hangUpParams);
         if (assetsFullscreen && model.tabletDemoMode) {
             micButton = ui.text(model.demoMicPaused ? "▶" : "Ⅱ", 30, 0xFFFF6377, 0);
             micButton.setGravity(Gravity.CENTER);
@@ -172,6 +285,7 @@ final class HomePage {
         if (stateLabel != null) stateLabel.bringToFront();
         if (audioLevelView != null) audioLevelView.bringToFront();
         if (micButton != null) micButton.bringToFront();
+        hangUpButton.bringToFront();
         top.bringToFront();
         return new Views(root, rootState.moodVeil, voiceOrbView, digitalAvatarView, assetVideoAvatarView,
                 voiceLastTurnView, stateLabel, audioLevelView, micButton, null, null);
@@ -184,22 +298,66 @@ final class HomePage {
         return background;
     }
 
+    private static GradientDrawable controlBackground(HerUi ui, int color, int radiusDp) {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(color);
+        background.setCornerRadius(ui.dp(radiusDp));
+        background.setStroke(ui.dp(1), 0x33FFFFFF);
+        return background;
+    }
+
+    private static ImageButton phoneButton(MainActivity activity, HerUi ui, Runnable action) {
+        ImageButton button = new ImageButton(activity);
+        button.setImageResource(R.drawable.ic_phone_call);
+        button.setColorFilter(0xFFFFFFFF);
+        button.setBackground(controlBackground(ui, 0x661C141A, 999));
+        button.setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(14));
+        button.setContentDescription("语音通话");
+        button.setOnClickListener(v -> action.run());
+        return button;
+    }
+
     interface Callbacks {
         void onSettings();
         void onChat();
         void onVoiceHome();
         void onToggleMic();
+        default void onHangUp() { }
+        default void onAsrPressStart(float rawY) { }
+        default void onAsrPressMove(float rawY) { }
+        default void onAsrPressEnd(float rawY) { }
+        default void onAsrPressCancel() { }
     }
 
     static final class LandingModel {
         final String userName;
         final String agentName;
         final int mood;
+        final boolean jessAvatarHome;
+        final String lastLine;
+        final String stateLabel;
+        final boolean asrListening;
+        final boolean avatarSpeaking;
+        final WeatherTool.WeatherResult weather;
+        final NewsTool.NewsResult news;
 
         LandingModel(String userName, String agentName, int mood) {
+            this(userName, agentName, mood, false, "", "", false, false, null, null);
+        }
+
+        LandingModel(String userName, String agentName, int mood, boolean jessAvatarHome,
+                String lastLine, String stateLabel, boolean asrListening, boolean avatarSpeaking,
+                WeatherTool.WeatherResult weather, NewsTool.NewsResult news) {
             this.userName = userName;
             this.agentName = agentName;
             this.mood = mood;
+            this.jessAvatarHome = jessAvatarHome;
+            this.lastLine = lastLine;
+            this.stateLabel = stateLabel;
+            this.asrListening = asrListening;
+            this.avatarSpeaking = avatarSpeaking;
+            this.weather = weather;
+            this.news = news;
         }
     }
 
@@ -253,11 +411,23 @@ final class HomePage {
         final TextView micButton;
         final TextView homeTimeView;
         final TextView handwrittenNameView;
+        final ImageButton textAsrButton;
+        final TextView textAsrHint;
 
         Views(FrameLayout root, MoodVeil moodVeil, VoiceOrbView voiceOrbView, DigitalAvatarView digitalAvatarView,
                 AssetVideoAvatarView assetVideoAvatarView, TextView voiceLastTurnView,
                 TextView stateLabel, AudioLevelView audioLevelView, TextView micButton,
                 TextView homeTimeView, TextView handwrittenNameView) {
+            this(root, moodVeil, voiceOrbView, digitalAvatarView, assetVideoAvatarView,
+                    voiceLastTurnView, stateLabel, audioLevelView, micButton,
+                    homeTimeView, handwrittenNameView, null, null);
+        }
+
+        Views(FrameLayout root, MoodVeil moodVeil, VoiceOrbView voiceOrbView, DigitalAvatarView digitalAvatarView,
+                AssetVideoAvatarView assetVideoAvatarView, TextView voiceLastTurnView,
+                TextView stateLabel, AudioLevelView audioLevelView, TextView micButton,
+                TextView homeTimeView, TextView handwrittenNameView,
+                ImageButton textAsrButton, TextView textAsrHint) {
             this.root = root;
             this.moodVeil = moodVeil;
             this.voiceOrbView = voiceOrbView;
@@ -269,6 +439,8 @@ final class HomePage {
             this.micButton = micButton;
             this.homeTimeView = homeTimeView;
             this.handwrittenNameView = handwrittenNameView;
+            this.textAsrButton = textAsrButton;
+            this.textAsrHint = textAsrHint;
         }
     }
 }

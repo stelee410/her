@@ -33,18 +33,22 @@ final class AssetVideoAvatarView extends FrameLayout {
     }
 
     AssetVideoAvatarView(Context context, TabletDemoCharacter character) {
+        this(context, character, 0);
+    }
+
+    AssetVideoAvatarView(Context context, TabletDemoCharacter character, int verticalOffsetPx) {
         super(context);
         setBackgroundColor(Color.BLACK);
         if (character == null) {
             phase = PHASE_IDLE;
-            greetingLayer = new VideoLayer(context, STANDBY_ASSET, true, null);
-            standbyLayer = new VideoLayer(context, STANDBY_ASSET, true, null);
-            talkingLayer = new VideoLayer(context, TALKING_ASSET, true, null);
+            greetingLayer = new VideoLayer(context, STANDBY_ASSET, true, null, verticalOffsetPx);
+            standbyLayer = new VideoLayer(context, STANDBY_ASSET, true, null, verticalOffsetPx);
+            talkingLayer = new VideoLayer(context, TALKING_ASSET, true, null, verticalOffsetPx);
         } else {
             phase = PHASE_GREETING;
-            greetingLayer = new VideoLayer(context, character.greetingAsset, false, this::onGreetingFinished);
-            standbyLayer = new VideoLayer(context, character.idleAsset, true, null);
-            talkingLayer = new VideoLayer(context, character.speakingAsset, true, null);
+            greetingLayer = new VideoLayer(context, character.greetingAsset, false, this::onGreetingFinished, verticalOffsetPx);
+            standbyLayer = new VideoLayer(context, character.idleAsset, true, null, verticalOffsetPx);
+            talkingLayer = new VideoLayer(context, character.speakingAsset, true, null, verticalOffsetPx);
         }
         addView(greetingLayer.texture, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         addView(standbyLayer.texture, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
@@ -136,17 +140,19 @@ final class AssetVideoAvatarView extends FrameLayout {
         private final String assetName;
         private final boolean looping;
         private final Runnable completion;
+        private final int verticalOffsetPx;
         private MediaPlayer player;
         private Surface surface;
         private boolean surfaceReady = false;
         private int videoWidth = 0;
         private int videoHeight = 0;
 
-        VideoLayer(Context context, String assetName, boolean looping, Runnable completion) {
+        VideoLayer(Context context, String assetName, boolean looping, Runnable completion, int verticalOffsetPx) {
             this.context = context;
             this.assetName = assetName;
             this.looping = looping;
             this.completion = completion;
+            this.verticalOffsetPx = verticalOffsetPx;
             texture = new TextureView(context);
             texture.setSurfaceTextureListener(this);
         }
@@ -232,6 +238,9 @@ final class AssetVideoAvatarView extends FrameLayout {
             float scaledHeight = videoHeight * scale;
             Matrix matrix = new Matrix();
             matrix.setScale(scaledWidth / viewWidth, scaledHeight / viewHeight, viewWidth / 2f, viewHeight / 2f);
+            if (verticalOffsetPx != 0) {
+                matrix.postTranslate(0, verticalOffsetPx);
+            }
             texture.setTransform(matrix);
         }
     }

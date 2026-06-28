@@ -56,6 +56,25 @@ val syncTabletDemoAssets by tasks.registering(org.gradle.api.tasks.Sync::class) 
     into(layout.buildDirectory.dir("generated/tablet-demo-assets"))
 }
 
+val syncPhoneJessAssets by tasks.registering(org.gradle.api.tasks.Sync::class) {
+    from(rootProject.layout.projectDirectory.file("assets/jess/res/jess-smile.mp4")) {
+        into("tablet_demo/jess")
+        rename { "greeting.mp4" }
+    }
+    from(rootProject.layout.projectDirectory.file("assets/jess/res/jess-stay.mp4")) {
+        into("tablet_demo/jess")
+        rename { "idle.mp4" }
+    }
+    from(rootProject.layout.projectDirectory.file("assets/jess/res/jess-speak-loop.mp4")) {
+        into("tablet_demo/jess")
+        rename { "speaking.mp4" }
+    }
+    from(rootProject.layout.projectDirectory.file("assets/jess/agent.md")) {
+        into("tablet_demo/jess")
+    }
+    into(layout.buildDirectory.dir("generated/phone-jess-assets"))
+}
+
 android {
     namespace = "com.linkyun.her"
     compileSdk = 35
@@ -109,6 +128,9 @@ android {
     }
 
     sourceSets {
+        getByName("phone") {
+            assets.srcDir(layout.buildDirectory.dir("generated/phone-jess-assets"))
+        }
         getByName("tablet") {
             assets.srcDir(layout.buildDirectory.dir("generated/fullscreen-avatar-assets"))
         }
@@ -129,8 +151,17 @@ tasks.matching { task ->
     }
 }
 
+tasks.matching { task ->
+    task.name.startsWith("prePhone") && task.name.endsWith("Build")
+}.configureEach {
+    dependsOn(syncPhoneJessAssets)
+}
+
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.media3:media3-exoplayer:1.8.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.8.1")
+    implementation("androidx.media3:media3-ui:1.8.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }

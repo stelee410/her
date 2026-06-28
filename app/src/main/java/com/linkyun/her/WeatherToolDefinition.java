@@ -2,6 +2,7 @@ package com.linkyun.her;
 
 final class WeatherToolDefinition implements ToolDefinition {
     static final String ID = "weather";
+    static final String LLM_TOOL_ID = "weather";
 
     @Override public String id() {
         return ID;
@@ -12,7 +13,7 @@ final class WeatherToolDefinition implements ToolDefinition {
     }
 
     @Override public boolean matchesBackgroundTool(String toolId) {
-        return false;
+        return LLM_TOOL_ID.equals(toolId);
     }
 
     @Override public boolean start(String question, boolean realtimeMode, ToolRouter.Host host) {
@@ -27,6 +28,8 @@ final class WeatherToolDefinition implements ToolDefinition {
     }
 
     @Override public boolean startFromBackground(String question, ToolRouter.Host host) {
-        return false;
+        host.logToolRoute("weather background intent hit text=" + question);
+        host.startWeather(question, true);
+        return true;
     }
 }

@@ -17,18 +17,18 @@ public final class TabletDemoCharacterCatalogTest {
         assertEquals("tablet_demo/star_1/speaking.mp4", characters[0].speakingAsset);
         assertEquals("tablet_demo/star_1/agent.md", characters[0].agentAsset);
         assertEquals(0, characters[0].voiceSlot);
-        assertEquals(0, characters[4].voiceSlot);
+        assertEquals(4, characters[4].voiceSlot);
     }
 
     @Test
-    public void usesSafeRealtimeVoiceUntilCharacterVoicesAreVerified() {
+    public void mapsPublicCharactersToVerifiedRealtimeVoices() {
         TabletDemoCharacter[] characters = TabletDemoCharacterCatalog.all();
 
-        assertEquals(TabletDemoCharacterCatalog.REALTIME_SAFE_VOICE, characters[0].voiceIdOverride);
-        assertEquals(TabletDemoCharacterCatalog.REALTIME_SAFE_VOICE, characters[1].voiceIdOverride);
-        assertEquals(TabletDemoCharacterCatalog.REALTIME_SAFE_VOICE, characters[2].voiceIdOverride);
-        assertEquals(TabletDemoCharacterCatalog.REALTIME_SAFE_VOICE, characters[3].voiceIdOverride);
-        assertEquals(TabletDemoCharacterCatalog.REALTIME_SAFE_VOICE, characters[4].voiceIdOverride);
+        assertEquals(TabletDemoCharacterCatalog.YEDU_VOICE, characters[0].voiceIdOverride);
+        assertEquals(TabletDemoCharacterCatalog.NEMU_VOICE, characters[1].voiceIdOverride);
+        assertEquals(TabletDemoCharacterCatalog.KIRA_VOICE, characters[2].voiceIdOverride);
+        assertEquals(TabletDemoCharacterCatalog.WALLE_VOICE, characters[3].voiceIdOverride);
+        assertEquals(TabletDemoCharacterCatalog.GRAY_VOICE, characters[4].voiceIdOverride);
     }
 
     @Test
@@ -42,6 +42,7 @@ public final class TabletDemoCharacterCatalogTest {
         assertEquals("tablet_demo/jess/idle.mp4", jess.idleAsset);
         assertEquals("tablet_demo/jess/speaking.mp4", jess.speakingAsset);
         assertEquals("tablet_demo/jess/agent.md", jess.agentAsset);
+        assertEquals(TabletDemoCharacterCatalog.REALTIME_SAFE_VOICE, jess.voiceIdOverride);
         for (TabletDemoCharacter character : characters) {
             assertTrue(!"jess".equals(character.id));
         }

@@ -17,10 +17,19 @@ final class RealtimeErrorEventDecision {
     }
 
     static RealtimeErrorEventDecision fromPayload(JSONObject payload) {
-        if (payload != null && payload.optBoolean("recoverable", false)) {
+        if (isRecoverable(payload)) {
             return new RealtimeErrorEventDecision(Action.RETRY, message(payload));
         }
         return new RealtimeErrorEventDecision(Action.ERROR, message(payload));
+    }
+
+    private static boolean isRecoverable(JSONObject payload) {
+        if (payload == null) return false;
+        if (payload.optBoolean("recoverable", false)) return true;
+        String code = payload.optString("code", "");
+        String message = payload.optString("message", "");
+        return "realtime_unavailable".equals(code) ||
+                message.contains("Unexpected server response: 521");
     }
 
     private static String message(JSONObject payload) {

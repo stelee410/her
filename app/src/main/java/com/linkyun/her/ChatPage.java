@@ -81,14 +81,14 @@ final class ChatPage {
         asr.setOnTouchListener((v, event) -> {
             switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                callbacks.onAsrPressStart(event.getRawX());
+                callbacks.onAsrPressStart(event.getRawY());
                 return true;
             case MotionEvent.ACTION_MOVE:
-                callbacks.onAsrPressMove(event.getRawX());
+                callbacks.onAsrPressMove(event.getRawY());
                 return true;
             case MotionEvent.ACTION_UP:
                 v.performClick();
-                callbacks.onAsrPressEnd(event.getRawX());
+                callbacks.onAsrPressEnd(event.getRawY());
                 return true;
             case MotionEvent.ACTION_CANCEL:
                 callbacks.onAsrPressCancel();
@@ -178,9 +178,9 @@ final class ChatPage {
 
     interface Callbacks {
         void onBack();
-        void onAsrPressStart(float rawX);
-        void onAsrPressMove(float rawX);
-        void onAsrPressEnd(float rawX);
+        void onAsrPressStart(float rawY);
+        void onAsrPressMove(float rawY);
+        void onAsrPressEnd(float rawY);
         void onAsrPressCancel();
         void onSend(String text);
     }

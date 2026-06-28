@@ -72,8 +72,7 @@ final class ChatController {
     private void handleSuccess(String reply) {
         if (reply == null || reply.isEmpty()) {
             host.hideReplyPlaceholder();
-            host.toastError("文本聊天返回为空");
-            host.setState("error");
+            host.setState("ready");
             return;
         }
         host.hideReplyPlaceholder();

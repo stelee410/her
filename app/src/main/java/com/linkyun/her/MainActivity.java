@@ -4,6 +4,7 @@ import android.animation.ValueAnimator;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.PendingIntent;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -14,6 +15,8 @@ import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
+import android.nfc.NfcAdapter;
+import android.nfc.Tag;
 import android.os.Build;
 import android.os.SystemClock;
 import android.os.Bundle;
@@ -92,12 +95,15 @@ public class MainActivity extends Activity {
     private static final String PREF_DIGITAL_AVATAR_ENABLED = "digital_avatar_enabled";
     private static final String PREF_DIGITAL_AVATAR_PLAYBACK_MODE = "digital_avatar_playback_mode";
     private static final String PREF_TABLET_DEMO_CHARACTER = "tablet_demo_character";
+    private static final String PREF_TTS_VOICE = "tts_voice";
     private static final String[] AGENT_NAME_CANDIDATE_NAMES = {
             "Ava", "Chloe", "Nora", "Clara", "Mira", "Aria",
             "Iris", "Luna", "Elara", "Serena", "Evelyn", "Victoria"
     };
     private static final String AGENT_NAME_CANDIDATES = "Ava、Chloe、Nora、Clara、Mira、Aria、Iris、Luna、Elara、Serena、Evelyn、Victoria";
     private static final String DEFAULT_VOICE = BuildConfig.AGENTVOICE_CLONED_VOICE;
+    private static final String DEFAULT_TTS_VOICE = "zh_female_wanwanxiaohe_moon_bigtts";
+    private static final String LOW_LATENCY_TTS_VOICE = "zh_female_vv_uranus_bigtts";
     private static final String INSTRUCTIONS =
             "你是一个像 Her 里那样亲密、聪明、有温度的中文陪伴式语音助手。\n" +
             "你默认使用温柔大姐姐的语气：成熟、关照、轻轻调侃，但不要油腻或过度亲密。\n" +
@@ -118,6 +124,7 @@ public class MainActivity extends Activity {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Message> messages = new ArrayList<>();
     private final List<Voice> voices = new ArrayList<>();
+    private final List<Voice> ttsVoices = new ArrayList<>();
     private final Random random = new Random();
     private final RealtimeClient realtime = new RealtimeClient(TAG, new RealtimeClient.Host() {
         @Override public Handler mainHandler() {
@@ -185,6 +192,7 @@ public class MainActivity extends Activity {
     private ToolInteractionCoordinator toolInteractions;
     private ToolRouter toolRouter;
     private BackgroundToolRouteController backgroundToolRoutes;
+    private LlmToolRouteController llmToolRoutes;
     private ToolResultPresenter toolResultPresenter;
     private WeatherRequestCoordinator weatherRequests;
     private VoiceCardController voiceCards;
@@ -193,6 +201,9 @@ public class MainActivity extends Activity {
     private RealtimeClosedHandler realtimeClosedHandler;
     private RealtimeAsrFinalController realtimeAsrFinalController;
     private VoiceInputCoordinator voiceInput;
+    private TabletDemoNfcIdentityStore tabletDemoNfcIdentities;
+    private NfcAdapter nfcAdapter;
+    private PendingIntent nfcPendingIntent;
     private MediaSession headsetMediaSession;
     private HerUi ui;
     private long lastMicInputLogAt;
@@ -205,6 +216,8 @@ public class MainActivity extends Activity {
     private long sessionId = -1;
     private String selectedVoiceId = DEFAULT_VOICE;
     private String selectedVoiceLabel = "Doris Clone";
+    private String selectedTtsVoiceId = TtsVoiceCatalog.DEFAULT_ID;
+    private String selectedTtsVoiceLabel = TtsVoiceCatalog.labelFor(TtsVoiceCatalog.DEFAULT_ID);
     private String agentName = SYSTEM_AGENT_NAME;
     private String initAgentNameCandidates = AGENT_NAME_CANDIDATES;
     private String userName = "";
@@ -230,7 +243,11 @@ public class MainActivity extends Activity {
     private String digitalAvatarPlaybackMode = AvatarPlaybackMode.JESS;
     private TabletDemoCharacter tabletDemoCharacter = TabletDemoCharacterCatalog.defaultCharacter();
     private boolean voiceInputSurfaceActive = false;
+    private boolean homeAvatarTextModeActive = false;
+    private TextFallbackNavigationDecision.ReturnSurface textModeReturnSurface =
+            TextFallbackNavigationDecision.ReturnSurface.VOICE;
     private boolean tabletDemoMicPaused = false;
+    private boolean tabletDemoNfcRegistrationPending = false;
     private boolean skipNextVoiceAutoStart = false;
     private boolean compactInProgress = false;
     private boolean memoryDirtyForRealtime = false;
@@ -248,7 +265,7 @@ public class MainActivity extends Activity {
     private boolean textModeAsrFinishAfterStart = false;
     private boolean textModeAsrTouchActive = false;
     private boolean textModeAsrDiscardResult = false;
-    private float textModeAsrTouchStartX = 0;
+    private float textModeAsrTouchStartY = 0;
     private int textModeAsrGestureState = TextModeAsrGesture.NEUTRAL;
     private boolean textReplyPlaceholderVisible = false;
     private int textReplyPlaceholderFrame = 0;
@@ -296,6 +313,8 @@ public class MainActivity extends Activity {
     private float replyOriginalBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
     private long summaryStartedAt = 0;
     private long appStartedAt = 0;
+    private int homeAvatarTtsSeq = 0;
+    private String lastHomeAvatarSpokenMessageId = "";
     private final Object textModeAsrAudioLock = new Object();
     private final List<byte[]> textModeAsrBufferedAudio = new ArrayList<>();
     private int textModeAsrBufferedBytes = 0;
@@ -316,6 +335,11 @@ public class MainActivity extends Activity {
         requestNotificationPermissionIfNeeded();
 
         ui = new HerUi(this);
+        SharedPreferences prefs = getSharedPreferences("her", MODE_PRIVATE);
+        ttsVoices.addAll(TtsVoiceCatalog.usableVoices());
+        selectedTtsVoiceId = TtsVoiceCatalog.find(
+                prefs.getString(PREF_TTS_VOICE, TtsVoiceCatalog.DEFAULT_ID)).id;
+        selectedTtsVoiceLabel = TtsVoiceCatalog.labelFor(selectedTtsVoiceId);
         agents = new AgentApiClient(llmHttp, main);
         textModeAsr = new TextModeAsrClient(TAG, main,
                 BuildConfig.AGENTLLM_BASE_URL, BuildConfig.AGENTLLM_API_KEY);
@@ -325,7 +349,8 @@ public class MainActivity extends Activity {
         newsHandler = new NewsInteractionHandler(new NewsTool(llmHttp, main));
         ttsPlayer = new GatewayTtsPlayer(TAG, llmHttp, main, getCacheDir(),
                 BuildConfig.AGENTLLM_BASE_URL, BuildConfig.AGENTLLM_API_KEY,
-                "doubao-tts", DEFAULT_VOICE);
+                "doubao-tts", TtsVoiceCatalog.voiceOrder(selectedTtsVoiceId));
+        ttsPlayer.warmup();
         realtimeRecovery = createRealtimeErrorRecoveryController();
         realtimeClosedHandler = createRealtimeClosedHandler();
         realtimeAsrFinalController = createRealtimeAsrFinalController();
@@ -335,22 +360,24 @@ public class MainActivity extends Activity {
         toolInteractions = createToolInteractionCoordinator();
         toolRouter = createToolRouter();
         backgroundToolRoutes = createBackgroundToolRouteController();
+        llmToolRoutes = createLlmToolRouteController();
         toolResultPresenter = createToolResultPresenter();
         weatherRequests = createWeatherRequestCoordinator();
         voiceCards = createVoiceCardController();
         voiceSession = createVoiceSessionOrchestrator();
         voices.add(new Voice(DEFAULT_VOICE, "Doris Clone", "female"));
-        voices.add(new Voice("zh_female_roumeinvyou_emo_v2_mars_bigtts", "柔美女友（多情感）", "female"));
-        voices.add(new Voice("zh_female_gaolengyujie_emo_v2_mars_bigtts", "高冷御姐（多情感）", "female"));
-        voices.add(new Voice("zh_male_ruyayichen_emo_v2_mars_bigtts", "儒雅男友（多情感）", "male"));
-        SharedPreferences prefs = getSharedPreferences("her", MODE_PRIVATE);
+        voices.add(new Voice("zh_female_vv_jupiter_bigtts", "活泼女声（默认）", "female"));
+        voices.add(new Voice("zh_female_xiaohe_jupiter_bigtts", "甜美女声", "female"));
+        voices.add(new Voice("zh_male_yunzhou_jupiter_bigtts", "沉稳男声", "male"));
         headsets = new HeadsetBindingManager(this, prefs, this::onHeadsetDevicesChanged);
         headsets.start();
         voiceAudioRoute = new VoiceAudioRouteManager(this);
         voiceprintStore = new VoiceprintProfileStore(prefs);
+        tabletDemoNfcIdentities = new TabletDemoNfcIdentityStore(prefs);
         tabletDemoCharacter = TabletDemoCharacterCatalog.find(
                 prefs.getString(PREF_TABLET_DEMO_CHARACTER, TabletDemoCharacterCatalog.defaultCharacter().id));
         applyTabletDemoVoiceSelection();
+        setupTabletDemoNfc();
         demoMode = tabletDemoMode() || prefs.getBoolean(PREF_DEMO_MODE, false);
         digitalAvatarEnabled = tabletDemoMode() || prefs.getBoolean(PREF_DIGITAL_AVATAR_ENABLED, false);
         digitalAvatarPlaybackMode = tabletDemoMode()
@@ -388,6 +415,7 @@ public class MainActivity extends Activity {
             beginInitialization("");
         }
         loadVoices();
+        handleTabletDemoNfcIntent(getIntent());
         handleVoiceCommandIntent(getIntent());
     }
 
@@ -395,6 +423,13 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         enterFullscreenMode();
+        enableTabletDemoNfcDispatch();
+    }
+
+    @Override
+    protected void onPause() {
+        disableTabletDemoNfcDispatch();
+        super.onPause();
     }
 
     @Override
@@ -1126,6 +1161,10 @@ public class MainActivity extends Activity {
                 MainActivity.this.adjustVoiceVolume(direction);
             }
 
+            @Override public void openTv(String question, boolean realtimeMode) {
+                MainActivity.this.openTvFromTool(question, realtimeMode);
+            }
+
             @Override public void logToolRoute(String message) {
                 Log.d(TAG, message);
             }
@@ -1156,6 +1195,34 @@ public class MainActivity extends Activity {
                 });
     }
 
+    private LlmToolRouteController createLlmToolRouteController() {
+        return new LlmToolRouteController(BACKGROUND_MODEL,
+                (body, callback) -> agents.sendSubconscious(body, callback, "非实时工具路由"),
+                new LlmToolRouteController.Host() {
+                    @Override public boolean hasApiKey() {
+                        return !BuildConfig.AGENTLLM_API_KEY.isEmpty();
+                    }
+
+                    @Override public String effectiveAgentName() {
+                        return MainActivity.this.effectiveAgentName();
+                    }
+
+                    @Override public boolean routeToolDecision(String toolId, double confidence,
+                            String text, boolean realtimeMode) {
+                        return toolRouter != null &&
+                                toolRouter.routeLlmDecision(toolId, confidence, text, realtimeMode);
+                    }
+
+                    @Override public void sendTextWithAgentLLM(String text) {
+                        MainActivity.this.sendTextWithAgentLLM(text);
+                    }
+
+                    @Override public void logToolRoute(String message) {
+                        Log.d(TAG, message);
+                    }
+                });
+    }
+
     private ToolResultPresenter createToolResultPresenter() {
         return new ToolResultPresenter(new ToolResultPresenter.Host() {
             @Override public void cacheToolFact(String toolId, String fact) {
@@ -1174,9 +1241,10 @@ public class MainActivity extends Activity {
                 addWeatherCard(result);
             }
 
-            @Override public void addAssistantMessage(String text) {
-                MainActivity.this.addChatMessage("assistant", text);
-            }
+                    @Override public void addAssistantMessage(String text) {
+                        MainActivity.this.addChatMessage("assistant", text);
+                        MainActivity.this.speakHomeAvatarAssistantReplySoon(text);
+                    }
 
             @Override public void renderMessages() {
                 MainActivity.this.renderMessages();
@@ -1268,7 +1336,7 @@ public class MainActivity extends Activity {
             }
 
             @Override public void refreshVoiceHome() {
-                showVoiceHome();
+                refreshCardSurface();
             }
         });
     }
@@ -1366,9 +1434,10 @@ public class MainActivity extends Activity {
                         MainActivity.this.breatheScreenForAssistantReply();
                     }
 
-                    @Override public void addAssistantMessage(String text) {
-                        MainActivity.this.addChatMessage("assistant", text);
-                    }
+            @Override public void addAssistantMessage(String text) {
+                MainActivity.this.addChatMessage("assistant", text);
+                MainActivity.this.speakHomeAvatarAssistantReplySoon(text);
+            }
 
                     @Override public void renderMessages() {
                         MainActivity.this.renderMessages();
@@ -1400,7 +1469,6 @@ public class MainActivity extends Activity {
 
             @Override public void addUserMessage(String text) {
                 MainActivity.this.addChatMessage("user", text);
-                MainActivity.this.handleAvatarVoiceCommand(text);
             }
 
             @Override public boolean recordInitializationAnswer(String text) {
@@ -1427,8 +1495,8 @@ public class MainActivity extends Activity {
                 MainActivity.this.finishInitializationWithSummary();
             }
 
-            @Override public boolean routeToolQuestion(String text, boolean realtimeMode) {
-                return MainActivity.this.routeToolQuestion(text, realtimeMode);
+            @Override public void routeOrSendText(String text) {
+                MainActivity.this.routeOrSendText(text);
             }
 
             @Override public void sendTextWithAgentLLM(String text) {
@@ -1540,6 +1608,7 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        if (handleTabletDemoNfcIntent(intent)) return;
         handleVoiceCommandIntent(intent);
     }
 
@@ -1549,6 +1618,79 @@ public class MainActivity extends Activity {
             markConversationInteraction(false);
         }
         return super.dispatchTouchEvent(event);
+    }
+
+    private void setupTabletDemoNfc() {
+        if (!tabletDemoMode()) return;
+        nfcAdapter = NfcAdapter.getDefaultAdapter(this);
+        if (nfcAdapter == null) {
+            Log.d(TAG, "tablet demo nfc unavailable");
+            return;
+        }
+        Intent intent = new Intent(this, getClass()).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) flags |= PendingIntent.FLAG_MUTABLE;
+        nfcPendingIntent = PendingIntent.getActivity(this, 0, intent, flags);
+    }
+
+    private void enableTabletDemoNfcDispatch() {
+        if (!tabletDemoMode() || nfcAdapter == null || nfcPendingIntent == null) return;
+        try {
+            nfcAdapter.enableForegroundDispatch(this, nfcPendingIntent, null, null);
+        } catch (IllegalStateException error) {
+            Log.d(TAG, "tablet demo nfc enable failed: " + error.getMessage());
+        }
+    }
+
+    private void disableTabletDemoNfcDispatch() {
+        if (!tabletDemoMode() || nfcAdapter == null) return;
+        try {
+            nfcAdapter.disableForegroundDispatch(this);
+        } catch (IllegalStateException error) {
+            Log.d(TAG, "tablet demo nfc disable failed: " + error.getMessage());
+        }
+    }
+
+    private boolean handleTabletDemoNfcIntent(Intent intent) {
+        if (!tabletDemoMode() || intent == null || !isNfcAction(intent.getAction())) return false;
+        Tag tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
+        String tagId = TabletDemoNfcIdentityStore.tagId(tag == null ? null : tag.getId());
+        if (tagId.isEmpty()) {
+            toastError("没有读到 NFC 卡标识。");
+            return true;
+        }
+        if (tabletDemoNfcRegistrationPending) {
+            tabletDemoNfcRegistrationPending = false;
+            if (tabletDemoNfcIdentities != null) {
+                tabletDemoNfcIdentities.bind(tagId, tabletDemoCharacter);
+            }
+            toastError("已将此 NFC 身份绑定到 " + tabletDemoCharacter.label);
+            Log.d(TAG, "tablet demo nfc bound tag=" + tagId + " character=" + tabletDemoCharacter.id);
+            return true;
+        }
+        String characterId = tabletDemoNfcIdentities == null
+                ? ""
+                : tabletDemoNfcIdentities.characterId(tagId);
+        if (characterId == null || characterId.trim().isEmpty()) {
+            toastError("这张 NFC 身份还没有登记。");
+            Log.d(TAG, "tablet demo nfc unknown tag=" + tagId);
+            return true;
+        }
+        TabletDemoCharacter character = TabletDemoCharacterCatalog.find(characterId);
+        if (!character.id.equals(characterId)) {
+            toastError("这张 NFC 身份对应的角色不存在。");
+            Log.d(TAG, "tablet demo nfc missing character tag=" + tagId + " character=" + characterId);
+            return true;
+        }
+        Log.d(TAG, "tablet demo nfc switch tag=" + tagId + " character=" + character.id);
+        switchTabletDemoCharacterTo(character);
+        return true;
+    }
+
+    private static boolean isNfcAction(String action) {
+        return NfcAdapter.ACTION_TAG_DISCOVERED.equals(action) ||
+                NfcAdapter.ACTION_TECH_DISCOVERED.equals(action) ||
+                NfcAdapter.ACTION_NDEF_DISCOVERED.equals(action);
     }
 
     private void handleVoiceCommandIntent(Intent intent) {
@@ -1798,37 +1940,77 @@ public class MainActivity extends Activity {
     }
 
     private void showHome() {
-        cancelTextModeAsr();
-        clearVoiceCards(false);
-        leaveVoiceSurface();
+        showHome(true, true, true);
+    }
+
+    private void showHome(boolean clearCards, boolean speakVisibleLine, boolean performCleanup) {
+        if (clearCards) clearVoiceCards(false);
+        boolean jessHome = shouldUseJessAvatarHome();
+        if (performCleanup) {
+            cancelTextModeAsr();
+            leaveVoiceSurface();
+            if (jessHome) {
+                enterHomeAvatarTextMode();
+            } else {
+                exitHomeAvatarTextMode(false);
+            }
+        }
         messageList = null;
         messageScroll = null;
         composer = null;
         textAsrButton = null;
         textAsrHint = null;
         if (homeClockTicker != null) main.removeCallbacks(homeClockTicker);
+        String lastLine = lastConversationLine();
         HomePage.Views views = HomePage.renderLanding(this, ui,
-                new HomePage.LandingModel(displayUserName(), agentName, moodForText(lastConversationLine())),
+                new HomePage.LandingModel(displayUserName(), agentName, moodForText(lastLine),
+                        jessHome, lastLine, currentStateLabelText(),
+                        textModeAsrStarting || textModeAsrRecording,
+                        voiceState.isSpeaking(),
+                        voiceCards == null ? null : voiceCards.latestWeather(),
+                        voiceCards == null ? null : voiceCards.latestNews()),
                 new HomePage.Callbacks() {
                     @Override public void onSettings() { showSettings(); }
-                    @Override public void onChat() { showChat(); }
+                    @Override public void onChat() { showChatFromHome(); }
                     @Override public void onVoiceHome() { showVoiceHome(); }
                     @Override public void onToggleMic() { toggleMic(); }
+                    @Override public void onAsrPressStart(float rawY) { startTextModeAsrPress(rawY); }
+                    @Override public void onAsrPressMove(float rawY) { moveTextModeAsrPress(rawY); }
+                    @Override public void onAsrPressEnd(float rawY) { endTextModeAsrPress(rawY); }
+                    @Override public void onAsrPressCancel() { cancelTextModeAsrPress(); }
                 });
         root = views.root;
         moodVeil = views.moodVeil;
-        stateLabel = null;
+        voiceLastTurnView = views.voiceLastTurnView;
+        stateLabel = views.stateLabel;
         digitalAvatarView = null;
-        assetVideoAvatarView = null;
+        assetVideoAvatarView = views.assetVideoAvatarView;
+        textAsrButton = views.textAsrButton;
+        textAsrHint = views.textAsrHint;
         homeTimeView = views.homeTimeView;
         handwrittenNameView = views.handwrittenNameView;
         setContentView(root);
-        animateAgentName();
-        startHomeClock();
+        refreshTextModeAsrControls();
+        if (jessHome) {
+            updateVoiceHome();
+            if (speakVisibleLine) main.postDelayed(this::speakVisibleHomeAvatarAssistantLineOnce, 650);
+        } else {
+            animateAgentName();
+            startHomeClock();
+        }
+    }
+
+    private void refreshCardSurface() {
+        if (homeAvatarTextModeActive && !voiceInputSurfaceActive) {
+            showHome(false, false, false);
+        } else {
+            showVoiceHome();
+        }
     }
 
     private void showVoiceHome() {
         cancelTextModeAsr();
+        exitHomeAvatarTextMode(true);
         voiceInputSurfaceActive = true;
         messageList = null;
         messageScroll = null;
@@ -1853,9 +2035,10 @@ public class MainActivity extends Activity {
                         tabletDemoCharacter),
                 new HomePage.Callbacks() {
                     @Override public void onSettings() { showSettings(); }
-                    @Override public void onChat() { showChat(); }
+                    @Override public void onChat() { showChatFromVoice(); }
                     @Override public void onVoiceHome() { showVoiceHome(); }
                     @Override public void onToggleMic() { toggleMic(); }
+                    @Override public void onHangUp() { hangUpVoiceToHome(); }
                 });
         root = views.root;
         moodVeil = views.moodVeil;
@@ -1887,6 +2070,36 @@ public class MainActivity extends Activity {
                 isBoundHeadsetConnected())) {
             requestVoiceInputStart(true);
         }
+    }
+
+    private boolean shouldUseJessAvatarHome() {
+        return initialized && !tabletDemoMode() && !digitalAvatarAvailable();
+    }
+
+    private void enterHomeAvatarTextMode() {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "home avatar text mode blocked: app running active");
+            return;
+        }
+        homeAvatarTextModeActive = true;
+        voiceInputSurfaceActive = false;
+        cancelVoiceSilenceTextModeTimeout();
+        if (realtimeRecovery != null) realtimeRecovery.resetRetryCount();
+        clearVoiceInputRequests();
+        clearPendingWeatherBroadcast();
+        clearPendingNewsBroadcast();
+        player.stop();
+        resetRealtimeOutput();
+        if (realtime.isOpen()) realtime.close();
+        if (mic.running || inputAudioOpen) stopInputAudio("text_only");
+        else setState("text_only");
+    }
+
+    private void exitHomeAvatarTextMode(boolean stopSpeech) {
+        if (!homeAvatarTextModeActive && !stopSpeech) return;
+        homeAvatarTextModeActive = false;
+        homeAvatarTtsSeq++;
+        if (stopSpeech) stopToolTtsPlayback(false);
     }
 
     private String displayUserName() {
@@ -2151,7 +2364,7 @@ public class MainActivity extends Activity {
                 new InitializationPage.Model(initProgressText(), lastInitializationLine(), stateLabelText(), moodForText(lastInitializationLine())),
                 new InitializationPage.Callbacks() {
                     @Override public void onSettings() { showSettings(); }
-                    @Override public void onChat() { showChat(); }
+                    @Override public void onChat() { showChatFromInitialization(); }
                     @Override public void onToggleMic() { toggleMic(); }
                     @Override public boolean isSummarizing() { return summaryInProgress; }
                 });
@@ -2166,10 +2379,41 @@ public class MainActivity extends Activity {
     }
 
     private void showChat() {
+        showChat(inferTextModeReturnSurface());
+    }
+
+    private void showChatFromHome() {
+        showChat(TextFallbackNavigationDecision.ReturnSurface.HOME);
+    }
+
+    private void showChatFromVoice() {
+        showChat(TextFallbackNavigationDecision.ReturnSurface.VOICE);
+    }
+
+    private void showChatFromInitialization() {
+        showChat(TextFallbackNavigationDecision.ReturnSurface.INITIALIZATION);
+    }
+
+    private TextFallbackNavigationDecision.ReturnSurface inferTextModeReturnSurface() {
+        boolean homeSurfaceActive = homeAvatarTextModeActive ||
+                homeTimeView != null ||
+                handwrittenNameView != null;
+        return TextFallbackNavigationDecision.inferReturnSurface(
+                initialized,
+                initializing,
+                voiceInputSurfaceActive,
+                homeSurfaceActive,
+                composer != null,
+                textModeReturnSurface);
+    }
+
+    private void showChat(TextFallbackNavigationDecision.ReturnSurface returnSurface) {
         if (isAppRunningSessionActive()) {
             Log.d(TAG, "show chat blocked: app running active");
             return;
         }
+        textModeReturnSurface = returnSurface;
+        exitHomeAvatarTextMode(true);
         clearVoiceCards(false);
         enterTextMode();
         homeTimeView = null;
@@ -2179,10 +2423,10 @@ public class MainActivity extends Activity {
                         textModeAsrStarting || textModeAsrRecording, textReplyPlaceholderText(),
                         moodForText(lastConversationLine()), messages),
                 new ChatPage.Callbacks() {
-                    @Override public void onBack() { if (initialized) openVoiceSurface(); else showInitializationHome(); }
-                    @Override public void onAsrPressStart(float rawX) { startTextModeAsrPress(rawX); }
-                    @Override public void onAsrPressMove(float rawX) { moveTextModeAsrPress(rawX); }
-                    @Override public void onAsrPressEnd(float rawX) { endTextModeAsrPress(rawX); }
+                    @Override public void onBack() { returnFromTextFallback(); }
+                    @Override public void onAsrPressStart(float rawY) { startTextModeAsrPress(rawY); }
+                    @Override public void onAsrPressMove(float rawY) { moveTextModeAsrPress(rawY); }
+                    @Override public void onAsrPressEnd(float rawY) { endTextModeAsrPress(rawY); }
                     @Override public void onAsrPressCancel() { cancelTextModeAsrPress(); }
                     @Override public void onSend(String text) { sendText(text); }
                 });
@@ -2196,6 +2440,21 @@ public class MainActivity extends Activity {
         textAsrButton = views.asrButton;
         textAsrHint = views.asrHint;
         setContentView(root);
+    }
+
+    private void returnFromTextFallback() {
+        switch (textModeReturnSurface) {
+        case HOME:
+            showHome();
+            return;
+        case INITIALIZATION:
+            showInitializationHome();
+            return;
+        case VOICE:
+        default:
+            if (initialized) openVoiceSurface();
+            else showInitializationHome();
+        }
     }
 
     private void enterTextMode() {
@@ -2226,7 +2485,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean isTextModeActive() {
-        return composer != null;
+        return composer != null || homeAvatarTextModeActive;
     }
 
     private void leaveVoiceSurface() {
@@ -2306,7 +2565,54 @@ public class MainActivity extends Activity {
         setContentView(root);
     }
 
+    private void showTtsVoices() {
+        clearVoiceCards(false);
+        leaveVoiceSurface();
+        root = baseRoot();
+        root.addView(topBar("‹", "TTS Voice", "", this::showSettings, null));
+        LinearLayout list = scrollableScreenList();
+        int[] colors = {0xFFFF5C75, 0xFFF68E68, 0xFF71BD9C, 0xFF9382C5, 0xFF6FA5CD, 0xFFD6B070};
+        for (int i = 0; i < ttsVoices.size(); i++) {
+            Voice voice = ttsVoices.get(i);
+            LinearLayout row = row();
+            SwatchView swatch = new SwatchView(this, colors[i % colors.length]);
+            row.addView(swatch, new LinearLayout.LayoutParams(dp(52), dp(52)));
+            LinearLayout labels = new LinearLayout(this);
+            labels.setOrientation(LinearLayout.VERTICAL);
+            labels.setGravity(Gravity.CENTER_VERTICAL);
+            labels.addView(text(voice.label, 16, Color.WHITE, 600));
+            labels.addView(text(voice.resource + " · " + voice.gender, 12, 0x8CFFE0E0, 0));
+            row.addView(labels, new LinearLayout.LayoutParams(0, -1, 1));
+            TextView check = text(voice.id.equals(selectedTtsVoiceId) ? "✓" : "", 24, 0xFFFF6377, 0);
+            check.setGravity(Gravity.CENTER);
+            row.addView(check, new LinearLayout.LayoutParams(dp(34), -1));
+            row.setOnClickListener(v -> {
+                selectedTtsVoiceId = voice.id;
+                selectedTtsVoiceLabel = voice.label;
+                getSharedPreferences("her", MODE_PRIVATE).edit()
+                        .putString(PREF_TTS_VOICE, selectedTtsVoiceId)
+                        .apply();
+                applyTtsVoiceSelection();
+                setState("idle");
+                showTtsVoices();
+            });
+            list.addView(row);
+        }
+        setContentView(root);
+    }
+
+    private void applyTtsVoiceSelection() {
+        selectedTtsVoiceId = TtsVoiceCatalog.find(selectedTtsVoiceId).id;
+        selectedTtsVoiceLabel = TtsVoiceCatalog.labelFor(selectedTtsVoiceId);
+        if (ttsPlayer != null) {
+            ttsPlayer.setVoicePreference(selectedTtsVoiceId,
+                    TtsVoiceCatalog.playbackOrder(selectedTtsVoiceId));
+        }
+    }
+
     private void showSettings() {
+        cancelTextModeAsr();
+        exitHomeAvatarTextMode(true);
         clearVoiceCards(false);
         leaveVoiceSurface();
         root = baseRoot();
@@ -2328,6 +2634,7 @@ public class MainActivity extends Activity {
             list.addView(navRow("▣", "数字形象视频源", AvatarPlaybackMode.settingsLabel(digitalAvatarPlaybackMode),
                     () -> setDigitalAvatarPlaybackMode(AvatarPlaybackMode.next(digitalAvatarPlaybackMode))));
         }
+        list.addView(navRow("♬", "TTS Voice", selectedTtsVoiceLabel, this::showTtsVoices));
         list.addView(ui.navRow(R.drawable.ic_headphones, "Headphones", headsetSettingsLabel(), () -> showHeadsetPrompt(false)));
         list.addView(navRow("≋", "Voice", selectedVoiceLabel, this::showVoices));
         list.addView(navRow("♬", "Sound", "76%", null));
@@ -2683,6 +2990,18 @@ public class MainActivity extends Activity {
         return ui.screenList(root);
     }
 
+    private LinearLayout scrollableScreenList() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(28), dp(92), dp(28), dp(28));
+        scroll.addView(list, new ScrollView.LayoutParams(-1, -2));
+        root.addView(scroll, 0, frame(-1, -1));
+        return list;
+    }
+
     private LinearLayout row() {
         return ui.row();
     }
@@ -2880,6 +3199,10 @@ public class MainActivity extends Activity {
             switchTabletDemoCharacterTo(TabletDemoCharacterCatalog.hiddenJess());
             return;
         }
+        if (tabletDemoMode() && TabletDemoVoiceCommand.shouldRegisterIdentity(normalized)) {
+            startTabletDemoNfcIdentityRegistration();
+            return;
+        }
         if (tabletDemoMode() && TabletDemoVoiceCommand.shouldChangeAvatar(normalized)) {
             switchTabletDemoCharacterFromCommand();
             return;
@@ -2905,7 +3228,23 @@ public class MainActivity extends Activity {
         String normalized = TabletDemoVoiceCommand.normalize(text);
         return TabletDemoVoiceCommand.shouldReplayGreeting(normalized) ||
                 TabletDemoVoiceCommand.shouldShowHiddenJess(normalized) ||
+                TabletDemoVoiceCommand.shouldRegisterIdentity(normalized) ||
                 TabletDemoVoiceCommand.shouldChangeAvatar(normalized);
+    }
+
+    private void startTabletDemoNfcIdentityRegistration() {
+        if (!tabletDemoMode()) return;
+        if (nfcAdapter == null) {
+            toastError("这台设备没有可用的 NFC。");
+            return;
+        }
+        if (!nfcAdapter.isEnabled()) {
+            toastError("请先打开 NFC，然后再说“登记身份”。");
+            return;
+        }
+        tabletDemoNfcRegistrationPending = true;
+        toastError("请将 NFC 卡贴到感应区，绑定到 " + tabletDemoCharacter.label);
+        Log.d(TAG, "tablet demo nfc registration pending character=" + tabletDemoCharacter.id);
     }
 
     private void replayTabletDemoGreeting() {
@@ -2971,6 +3310,11 @@ public class MainActivity extends Activity {
         showTvOverlay();
     }
 
+    private void openTvFromTool(String question, boolean realtimeMode) {
+        Log.d(TAG, "open tv tool realtime=" + realtimeMode + " question=" + question);
+        showTvOverlayFromCommand();
+    }
+
     private void enterTvOverlayMode() {
         enterAppRunningSession(AppRunningSession.MY_TV, "tv_command");
     }
@@ -2987,17 +3331,20 @@ public class MainActivity extends Activity {
     }
 
     private void showTvOverlay() {
-        if (!hasVideoLibraryPermission()) {
+        List<TvChannel> channels = new ArrayList<>(OnlineTvPlaylist.channels());
+        if (hasVideoLibraryPermission()) {
+            if (MyTvPlaylist.ensureDirectory()) {
+                channels.addAll(MyTvPlaylist.channels());
+            } else if (channels.isEmpty()) {
+                toastError("无法创建 " + MyTvPlaylist.displayPath());
+                restoreAfterFailedTvOverlayOpen();
+                return;
+            }
+        } else if (channels.isEmpty()) {
             pendingTvAfterVideoPermission = true;
             requestPermissions(new String[]{videoLibraryPermission()}, REQ_VIDEO_LIBRARY);
             return;
         }
-        if (!MyTvPlaylist.ensureDirectory()) {
-            toastError("无法创建 " + MyTvPlaylist.displayPath());
-            restoreAfterFailedTvOverlayOpen();
-            return;
-        }
-        List<File> videos = MyTvPlaylist.videos();
         FrameLayout host = root;
         if (host == null) {
             restoreAfterFailedTvOverlayOpen();
@@ -3010,9 +3357,9 @@ public class MainActivity extends Activity {
         }
         host.addView(tvOverlayView, ui.frame(-1, -1));
         tvOverlayView.bringToFront();
-        tvOverlayView.show(videos);
-        if (videos.isEmpty()) {
-            toastError("把视频放到 " + MyTvPlaylist.displayPath() + " 后再说“我要看电视”。");
+        tvOverlayView.show(channels);
+        if (channels.isEmpty()) {
+            toastError("没有可用的线上频道；也可以把视频放到 " + MyTvPlaylist.displayPath());
         }
     }
 
@@ -3124,6 +3471,11 @@ public class MainActivity extends Activity {
         if (textInputController != null) textInputController.sendText(text);
     }
 
+    private void routeOrSendText(String text) {
+        if (llmToolRoutes != null && llmToolRoutes.routeOrSend(text, false)) return;
+        sendTextWithAgentLLM(text);
+    }
+
     private boolean routeToolQuestion(String text, boolean realtimeMode) {
         if (handleTabletDemoLocalCommand(text)) return true;
         return toolRouter != null && toolRouter.routeUserText(text, realtimeMode);
@@ -3160,6 +3512,7 @@ public class MainActivity extends Activity {
 
     private void invalidateBackgroundToolRoute() {
         if (backgroundToolRoutes != null) backgroundToolRoutes.invalidate();
+        if (llmToolRoutes != null) llmToolRoutes.invalidate();
     }
 
     private void startNewsToolFromBackground(String question) {
@@ -3474,30 +3827,83 @@ public class MainActivity extends Activity {
     }
 
     private String buildTextChatInstructions() throws JSONException {
-        return buildInstructions() + "\n\n" +
-                "当前是文本聊天通道。请只输出适合聊天气泡展示的文字，不要描述语音、音频或工具过程。";
+        String surface = homeAvatarTextModeActive
+                ? "当前是手机首页 Jess 视频头像通道。你以乙女游戏角色对话的方式和用户互动：回复短、鲜活、有情绪，像字幕台词一样适合被 TTS 读出；不要描述视频、按钮、音频或工具过程。"
+                : "当前是文本聊天通道。请只输出适合聊天气泡展示的文字，不要描述语音、音频或工具过程。";
+        return buildInstructions() + "\n\n" + surface;
     }
 
-    private void startTextModeAsrPress(float rawX) {
+    private void speakHomeAvatarAssistantReplySoon(String text) {
+        if (!homeAvatarTextModeActive) return;
+        String clean = text == null ? "" : text.trim();
+        if (clean.isEmpty()) return;
+        int requestId = ++homeAvatarTtsSeq;
+        main.post(() -> speakHomeAvatarAssistantReply(requestId, clean));
+    }
+
+    private void speakHomeAvatarAssistantReply(int requestId, String text) {
+        if (!homeAvatarTextModeActive || requestId != homeAvatarTtsSeq) return;
+        if (ttsPlayer == null) return;
+        Log.i(TAG, "home avatar tts play request id=" + requestId + " len=" + text.length());
+        setState("speaking");
+        ttsPlayer.play("home-avatar-" + requestId, text, GatewayTtsPlayer.PlaybackOptions.media(1.0f),
+                new GatewayTtsPlayer.Listener() {
+                    @Override public void onStarted(String id, String spokenText) {
+                        if (!homeAvatarTextModeActive || requestId != homeAvatarTtsSeq) return;
+                        setState("speaking");
+                    }
+
+                    @Override public void onCompleted(String id) {
+                        if (!homeAvatarTextModeActive || requestId != homeAvatarTtsSeq) return;
+                        setState("text_only");
+                    }
+
+                    @Override public void onError(String id, String message) {
+                        Log.d(TAG, "home avatar tts failed: " + message);
+                        if (!homeAvatarTextModeActive || requestId != homeAvatarTtsSeq) return;
+                        setState("text_only");
+                    }
+                });
+    }
+
+    private void speakVisibleHomeAvatarAssistantLineOnce() {
+        if (!homeAvatarTextModeActive || textModeAsrStarting || textModeAsrRecording) return;
+        Message message = lastAssistantMessage();
+        if (message == null || message.text == null || message.text.trim().isEmpty()) return;
+        if (message.id.equals(lastHomeAvatarSpokenMessageId)) return;
+        lastHomeAvatarSpokenMessageId = message.id;
+        Log.i(TAG, "home avatar tts visible assistant id=" + message.id + " len=" + message.text.length());
+        speakHomeAvatarAssistantReplySoon(message.text);
+    }
+
+    private Message lastAssistantMessage() {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Message message = messages.get(i);
+            if ("assistant".equals(message.role)) return message;
+        }
+        return null;
+    }
+
+    private void startTextModeAsrPress(float rawY) {
         textModeAsrTouchActive = true;
-        textModeAsrTouchStartX = rawX;
+        textModeAsrTouchStartY = rawY;
         textModeAsrGestureState = TextModeAsrGesture.NEUTRAL;
         startTextModeAsr();
     }
 
-    private void moveTextModeAsrPress(float rawX) {
+    private void moveTextModeAsrPress(float rawY) {
         if (!textModeAsrTouchActive) return;
         int next = TextModeAsrGesture.decide(
-                rawX - textModeAsrTouchStartX,
+                rawY - textModeAsrTouchStartY,
                 ui == null ? TEXT_ASR_SLIDE_THRESHOLD_DP : ui.dp(TEXT_ASR_SLIDE_THRESHOLD_DP));
         if (next == textModeAsrGestureState) return;
         textModeAsrGestureState = next;
         refreshTextModeAsrControls();
     }
 
-    private void endTextModeAsrPress(float rawX) {
+    private void endTextModeAsrPress(float rawY) {
         if (!textModeAsrTouchActive) return;
-        moveTextModeAsrPress(rawX);
+        moveTextModeAsrPress(rawY);
         textModeAsrTouchActive = false;
         if (textModeAsrGestureState == TextModeAsrGesture.CANCEL) {
             cancelTextModeAsr();
@@ -4289,6 +4695,20 @@ public class MainActivity extends Activity {
         assistantAccumulator.clearActive();
         showChat();
         realtime.close();
+    }
+
+    private void hangUpVoiceToHome() {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "manual voice hang up ignored: app running active");
+            return;
+        }
+        Log.d(TAG, "manual voice hang up, return home");
+        cancelScheduledContinuousListening();
+        cancelAsrFinalTimeout();
+        persistActiveAssistantMessage();
+        assistantAccumulator.clearActive();
+        realtime.close();
+        showHome();
     }
 
     private void onRealtimeReady() {

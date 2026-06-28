@@ -109,7 +109,7 @@ public final class ChatControllerTest {
     }
 
     @Test
-    public void emptyReplyShowsError() {
+    public void emptyReplyReturnsReadyWithoutError() {
         Host host = new Host();
         Sender sender = new Sender();
         ChatController controller = new ChatController("model", sender, host);
@@ -118,8 +118,8 @@ public final class ChatControllerTest {
         sender.callback.onSuccess("");
 
         assertEquals("hidePlaceholder", host.events.get(2));
-        assertEquals("toast:文本聊天返回为空", host.events.get(3));
-        assertEquals("state:error", host.events.get(4));
+        assertEquals("state:ready", host.events.get(3));
+        assertEquals(4, host.events.size());
     }
 
     @Test

@@ -3,13 +3,18 @@ package com.linkyun.her;
 final class TabletDemoCharacterCatalog {
     private static final String ROOT = "tablet_demo";
     static final String REALTIME_SAFE_VOICE = BuildConfig.AGENTVOICE_CLONED_VOICE;
+    static final String YEDU_VOICE = "zh_female_vv_jupiter_bigtts";
+    static final String NEMU_VOICE = "zh_male_yunzhou_jupiter_bigtts";
+    static final String KIRA_VOICE = "zh_female_xiaohe_jupiter_bigtts";
+    static final String WALLE_VOICE = "zh_male_yunzhou_jupiter_bigtts";
+    static final String GRAY_VOICE = "zh_female_xiaohe_jupiter_bigtts";
 
     private static final TabletDemoCharacter[] CHARACTERS = new TabletDemoCharacter[] {
-            character("star_1", "野渡 YEDU", 0, REALTIME_SAFE_VOICE),
-            character("star_2", "眠音 NEMU", 0, REALTIME_SAFE_VOICE),
-            character("star_3", "绮罗 KIRA", 0, REALTIME_SAFE_VOICE),
-            character("star_4", "白墙 WALLE", 0, REALTIME_SAFE_VOICE),
-            character("star_5", "灰客 GRAY", 0, REALTIME_SAFE_VOICE)
+            character("star_1", "野渡 YEDU", 0, YEDU_VOICE),
+            character("star_2", "眠音 NEMU", 1, NEMU_VOICE),
+            character("star_3", "绮罗 KIRA", 2, KIRA_VOICE),
+            character("star_4", "白墙 WALLE", 3, WALLE_VOICE),
+            character("star_5", "灰客 GRAY", 4, GRAY_VOICE)
     };
     private static final TabletDemoCharacter HIDDEN_JESS = character(
             "jess", "Jess", 5, BuildConfig.AGENTVOICE_CLONED_VOICE);
