@@ -20,9 +20,9 @@ final class BackgroundToolRouteDecider {
                 "- open_tv：打开 AI 电视台/视频频道。\n" +
                 "- volume_up：调大语音通话音量。\n" +
                 "- volume_down：调小语音通话音量。\n" +
-                "如果用户想查、看、听、播报新闻/热点/每日新闻热点，返回 {\"tool\":\"daily_news\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
+                "如果用户想查、看、听、播报普通新闻/热点/每日新闻热点，返回 {\"tool\":\"daily_news\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
                 "如果用户询问天气、气温、温度、下雨、出门穿衣或带伞，返回 {\"tool\":\"weather\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
-                "如果用户想打开电视、看电视台、看视频频道、换到 AI TV 或找个视频看看，返回 {\"tool\":\"open_tv\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
+                "如果用户想打开电视、看电视台、看视频频道、换到 AI TV、找个视频看看，或想看/了解财经新闻、财经频道、商业新闻、股市新闻、市场资讯，返回 {\"tool\":\"open_tv\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
                 "如果用户要求调大声音/音量，返回 {\"tool\":\"volume_up\",\"confidence\":0.0到1.0,\"reason\":\"...\"}；要求调小声音/音量，返回 {\"tool\":\"volume_down\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
                 "如果只是普通聊天、评价刚才内容、追问旧回答、闲聊或不确定，返回 {\"tool\":\"none\",\"confidence\":0.0到1.0,\"reason\":\"...\"}。\n" +
                 "只输出 JSON，不要解释。");

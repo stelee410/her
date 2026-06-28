@@ -8,6 +8,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -70,7 +71,7 @@ final class AgentApiClient {
         body.put("model", model);
         body.put("messages", llmMessages);
         body.put("temperature", 0.7);
-        body.put("stream", false);
+        body.put("stream", true);
         enqueueChat(body, callback, "文本聊天");
     }
 
@@ -97,7 +98,9 @@ final class AgentApiClient {
                         JSONObject item = array.getJSONObject(i);
                         String id = item.optString("id");
                         if (!isRealtimeSupportedVoiceId(id)) continue;
-                        String label = id.equals(defaultVoice) ? "Doris Clone" : item.optString("label", id);
+                        String label = "zh_female_xiaohe_jupiter_bigtts".equals(id)
+                                ? "小何"
+                                : item.optString("label", id);
                         loaded.add(new Voice(id, label, item.optString("gender", "voice")));
                     }
                     loaded.sort((a, b) -> a.id.equals(defaultVoice) ? -1 : b.id.equals(defaultVoice) ? 1 : 0);
@@ -118,6 +121,9 @@ final class AgentApiClient {
     private void enqueueChat(JSONObject body, ReplyCallback callback, String label) {
         long startedAtMs = SystemClock.elapsedRealtime();
         String model = body.optString("model", "");
+        try {
+            body.put("stream", true);
+        } catch (JSONException ignored) { }
         Request request = new Request.Builder()
                 .url(BuildConfig.AGENTLLM_BASE_URL + "/v1/chat/completions")
                 .header("Authorization", "Bearer " + BuildConfig.AGENTLLM_API_KEY)
@@ -135,9 +141,9 @@ final class AgentApiClient {
             }
 
             @Override public void onResponse(Call call, Response response) throws IOException {
-                String responseText = response.body() == null ? "" : response.body().string();
                 long elapsedMs = elapsedSince(startedAtMs);
                 if (!response.isSuccessful()) {
+                    String responseText = response.body() == null ? "" : response.body().string();
                     Log.i(TAG, "agent chat http failed label=" + label
                             + " model=" + model
                             + " code=" + response.code()
@@ -146,9 +152,10 @@ final class AgentApiClient {
                     main.post(() -> callback.onError(label + "接口失败：" + response.code()));
                     return;
                 }
+                String responseText = readResponseText(response);
                 try {
-                    String reply = extractAssistantContent(responseText).trim();
-                    Log.i(TAG, "agent chat completed label=" + label
+                    String reply = extractAssistantContentAny(responseText).trim();
+                    Log.i(TAG, "agent chat stream completed label=" + label
                             + " model=" + model
                             + " elapsedMs=" + elapsedMs
                             + " replyChars=" + reply.length());
@@ -168,11 +175,56 @@ final class AgentApiClient {
         return SystemClock.elapsedRealtime() - startedAtMs;
     }
 
+    private static String readResponseText(Response response) throws IOException {
+        if (response.body() == null) return "";
+        String contentType = response.header("Content-Type", "");
+        if (!contentType.toLowerCase().contains("text/event-stream")) {
+            return response.body().string();
+        }
+        StringBuilder text = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(response.body().charStream())) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                text.append(line).append('\n');
+            }
+        }
+        return text.toString();
+    }
+
+    static String extractAssistantContentAny(String responseText) throws JSONException {
+        String text = responseText == null ? "" : responseText.trim();
+        if (text.startsWith("data:") || text.contains("\ndata:")) {
+            return extractStreamingAssistantContent(text);
+        }
+        return extractAssistantContent(text);
+    }
+
     static String extractAssistantContent(String responseText) throws JSONException {
         return new JSONObject(responseText)
                 .getJSONArray("choices")
                 .getJSONObject(0)
                 .getJSONObject("message")
                 .optString("content", "");
+    }
+
+    static String extractStreamingAssistantContent(String responseText) throws JSONException {
+        StringBuilder content = new StringBuilder();
+        String[] lines = (responseText == null ? "" : responseText).split("\\r?\\n");
+        for (String line : lines) {
+            String trimmed = line == null ? "" : line.trim();
+            if (!trimmed.startsWith("data:")) continue;
+            String data = trimmed.substring("data:".length()).trim();
+            if (data.isEmpty() || "[DONE]".equals(data)) continue;
+            JSONObject object = new JSONObject(data);
+            JSONObject choice = object.getJSONArray("choices").getJSONObject(0);
+            JSONObject delta = choice.optJSONObject("delta");
+            if (delta != null) {
+                content.append(delta.optString("content", ""));
+                continue;
+            }
+            JSONObject message = choice.optJSONObject("message");
+            if (message != null) content.append(message.optString("content", ""));
+        }
+        return content.toString();
     }
 }

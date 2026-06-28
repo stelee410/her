@@ -14,6 +14,7 @@ public final class TtsVoiceCatalogTest {
 
         assertEquals(10, voices.size());
         assertEquals("zh_female_vv_uranus_bigtts", voices.get(0).id);
+        assertEquals("vivi 2.0", voices.get(0).label);
         assertEquals("seed2", voices.get(0).resource);
         assertEquals("S_VCQjam1U1", voices.get(9).id);
         assertEquals("v1", voices.get(9).resource);

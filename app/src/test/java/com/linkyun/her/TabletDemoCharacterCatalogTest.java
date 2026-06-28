@@ -29,6 +29,9 @@ public final class TabletDemoCharacterCatalogTest {
         assertEquals(TabletDemoCharacterCatalog.KIRA_VOICE, characters[2].voiceIdOverride);
         assertEquals(TabletDemoCharacterCatalog.WALLE_VOICE, characters[3].voiceIdOverride);
         assertEquals(TabletDemoCharacterCatalog.GRAY_VOICE, characters[4].voiceIdOverride);
+        for (TabletDemoCharacter character : characters) {
+            assertEquals(TabletDemoCharacterCatalog.XIAOHE_VOICE, character.voiceIdOverride);
+        }
     }
 
     @Test

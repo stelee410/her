@@ -317,16 +317,15 @@ final class GatewayTtsPlayer {
             Listener listener, int voiceIndex, long startedAtMs) {
         WsPlayback request = new WsPlayback(run, id, text, playback, listener, voiceIndex, startedAtMs);
         synchronized (wsLock) {
-            currentWsPlayback = request;
-            scheduleWsTimeoutLocked(request);
             if (isWebSocketReadyLocked(voiceIndex)) {
+                currentWsPlayback = request;
+                scheduleWsTimeoutLocked(request);
                 return sendWsTaskLocked(request);
             }
-            ensureWebSocketLocked(voiceIndex, startedAtMs, false);
-            Log.i(tag, "gateway tts ws waiting id=" + id
+            Log.i(tag, "gateway tts ws not ready, use http stream id=" + id
                     + " voice=" + voiceForIndex(voiceIndex)
                     + " elapsedMs=" + elapsedSince(startedAtMs));
-            return true;
+            return false;
         }
     }
 
@@ -798,11 +797,13 @@ final class GatewayTtsPlayer {
             PlaybackOptions playback, Listener listener, int voiceIndex, long startedAtMs) {
         if (!isCurrent(run)) return;
         String voice = voiceForIndex(voiceIndex);
+        String resource = resourceForVoice(voice);
         JSONObject body = new JSONObject();
         try {
             body.put("model", model);
             body.put("input", text);
             body.put("voice", voice);
+            body.put("resource", resource);
             body.put("response_format", responseFormat);
             body.put("speed", 1.0);
         } catch (Exception error) {
@@ -836,7 +837,8 @@ final class GatewayTtsPlayer {
                     String responseText = response.body() == null ? "" : response.body().string();
                     Log.i(tag, "gateway tts http failed id=" + id + " voice=" + voice
                             + " format=" + responseFormat + " code=" + response.code()
-                            + " elapsedMs=" + elapsedSince(startedAtMs));
+                            + " elapsedMs=" + elapsedSince(startedAtMs)
+                            + " body=" + abbreviate(responseText, 180));
                     if (shouldFallbackVoice(response.code()) && voiceIndex + 1 < voices.length) {
                         clearCallIfOwned(requestCall);
                         preferredVoiceIndex = voiceIndex + 1;
@@ -872,6 +874,13 @@ final class GatewayTtsPlayer {
 
     private static boolean shouldFallbackVoice(int httpCode) {
         return httpCode == 400 || httpCode == 422;
+    }
+
+    private static String abbreviate(String text, int maxChars) {
+        if (text == null) return "";
+        String clean = text.replace('\n', ' ').replace('\r', ' ').trim();
+        if (clean.length() <= maxChars) return clean;
+        return clean.substring(0, maxChars) + "...";
     }
 
     private static String[] sanitizeVoices(String[] rawVoices) {
@@ -990,6 +999,7 @@ final class GatewayTtsPlayer {
         Log.i(tag, "gateway tts stream completed id=" + id
                 + " elapsedMs=" + elapsedSince(requestStartedAtMs)
                 + " bytes=" + totalBytes);
+        warmup();
         postCompleted(run, listener, id);
     }
 
@@ -1140,6 +1150,7 @@ final class GatewayTtsPlayer {
                     + " elapsedMs=" + elapsedSince(requestStartedAtMs));
             listener.onStarted(id, text);
             ownedPlayer.start();
+            warmup();
         } catch (Exception error) {
             Log.d(tag, "gateway tts playback failed format=" + responseFormat + ": " + error.getMessage());
             stopPlayerIfOwned(mediaPlayer);

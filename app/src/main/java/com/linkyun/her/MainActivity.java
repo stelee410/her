@@ -96,13 +96,14 @@ public class MainActivity extends Activity {
     private static final String PREF_DIGITAL_AVATAR_PLAYBACK_MODE = "digital_avatar_playback_mode";
     private static final String PREF_TABLET_DEMO_CHARACTER = "tablet_demo_character";
     private static final String PREF_TTS_VOICE = "tts_voice";
+    private static final String PREF_TTS_VOICE_XIAOHE_MIGRATED = "tts_voice_xiaohe_migrated";
     private static final String[] AGENT_NAME_CANDIDATE_NAMES = {
             "Ava", "Chloe", "Nora", "Clara", "Mira", "Aria",
             "Iris", "Luna", "Elara", "Serena", "Evelyn", "Victoria"
     };
     private static final String AGENT_NAME_CANDIDATES = "Ava、Chloe、Nora、Clara、Mira、Aria、Iris、Luna、Elara、Serena、Evelyn、Victoria";
-    private static final String DEFAULT_VOICE = BuildConfig.AGENTVOICE_CLONED_VOICE;
-    private static final String DEFAULT_TTS_VOICE = "zh_female_wanwanxiaohe_moon_bigtts";
+    private static final String DEFAULT_VOICE = "zh_female_xiaohe_jupiter_bigtts";
+    private static final String DEFAULT_VOICE_LABEL = "小何";
     private static final String LOW_LATENCY_TTS_VOICE = "zh_female_vv_uranus_bigtts";
     private static final String INSTRUCTIONS =
             "你是一个像 Her 里那样亲密、聪明、有温度的中文陪伴式语音助手。\n" +
@@ -120,6 +121,8 @@ public class MainActivity extends Activity {
             "每次只问一个问题，回复要短，不要展开闲聊，不要一次列清单。";
     private static final String INIT_WAKE_EVENT =
             "【系统事件】用户刚打开应用，正在等待 Agent 主动问候。请不要复述本事件；请直接用第一人称主动介绍自己，并问第一个初始化问题。";
+    private static final int HOME_SUBTITLE_TYPEWRITER_CHARS = 18;
+    private static final long HOME_SUBTITLE_TYPEWRITER_INTERVAL_MS = 90L;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Message> messages = new ArrayList<>();
@@ -215,7 +218,7 @@ public class MainActivity extends Activity {
     private FrameLayout root;
     private long sessionId = -1;
     private String selectedVoiceId = DEFAULT_VOICE;
-    private String selectedVoiceLabel = "Doris Clone";
+    private String selectedVoiceLabel = DEFAULT_VOICE_LABEL;
     private String selectedTtsVoiceId = TtsVoiceCatalog.DEFAULT_ID;
     private String selectedTtsVoiceLabel = TtsVoiceCatalog.labelFor(TtsVoiceCatalog.DEFAULT_ID);
     private String agentName = SYSTEM_AGENT_NAME;
@@ -259,6 +262,7 @@ public class MainActivity extends Activity {
     private boolean pendingVoiceInputAfterBluetoothPermission = false;
     private boolean pendingVoiceprintEnrollmentAfterPermission = false;
     private boolean pendingTvAfterVideoPermission = false;
+    private String pendingTvPreferredChannelId = "";
     private boolean voiceprintRejectedThisTurn = false;
     private boolean voiceprintEnrollmentFinishing = false;
     private boolean textModeAsrTaskReady = false;
@@ -267,6 +271,9 @@ public class MainActivity extends Activity {
     private boolean textModeAsrDiscardResult = false;
     private float textModeAsrTouchStartY = 0;
     private int textModeAsrGestureState = TextModeAsrGesture.NEUTRAL;
+    private boolean voicePressTouchActive = false;
+    private boolean voicePressCancel = false;
+    private float voicePressTouchStartY = 0;
     private boolean textReplyPlaceholderVisible = false;
     private int textReplyPlaceholderFrame = 0;
     private int weatherIntentSeq = 0;
@@ -307,6 +314,7 @@ public class MainActivity extends Activity {
     private Runnable voiceprintEnrollmentTimeout;
     private Runnable textModeAsrPulse;
     private Runnable textReplyPlaceholderTicker;
+    private Runnable homeSubtitleTypewriterTicker;
     private boolean conversationOverLockscreen = false;
     private PowerManager.WakeLock replyWakeLock;
     private ValueAnimator replyBrightnessAnimator;
@@ -315,6 +323,8 @@ public class MainActivity extends Activity {
     private long appStartedAt = 0;
     private int homeAvatarTtsSeq = 0;
     private String lastHomeAvatarSpokenMessageId = "";
+    private String homeSubtitleTypewriterText = "";
+    private int homeSubtitleTypewriterFrame = 0;
     private final Object textModeAsrAudioLock = new Object();
     private final List<byte[]> textModeAsrBufferedAudio = new ArrayList<>();
     private int textModeAsrBufferedBytes = 0;
@@ -337,8 +347,7 @@ public class MainActivity extends Activity {
         ui = new HerUi(this);
         SharedPreferences prefs = getSharedPreferences("her", MODE_PRIVATE);
         ttsVoices.addAll(TtsVoiceCatalog.usableVoices());
-        selectedTtsVoiceId = TtsVoiceCatalog.find(
-                prefs.getString(PREF_TTS_VOICE, TtsVoiceCatalog.DEFAULT_ID)).id;
+        selectedTtsVoiceId = TtsVoiceCatalog.find(preferredTtsVoiceId(prefs)).id;
         selectedTtsVoiceLabel = TtsVoiceCatalog.labelFor(selectedTtsVoiceId);
         agents = new AgentApiClient(llmHttp, main);
         textModeAsr = new TextModeAsrClient(TAG, main,
@@ -350,7 +359,6 @@ public class MainActivity extends Activity {
         ttsPlayer = new GatewayTtsPlayer(TAG, llmHttp, main, getCacheDir(),
                 BuildConfig.AGENTLLM_BASE_URL, BuildConfig.AGENTLLM_API_KEY,
                 "doubao-tts", TtsVoiceCatalog.voiceOrder(selectedTtsVoiceId));
-        ttsPlayer.warmup();
         realtimeRecovery = createRealtimeErrorRecoveryController();
         realtimeClosedHandler = createRealtimeClosedHandler();
         realtimeAsrFinalController = createRealtimeAsrFinalController();
@@ -365,9 +373,8 @@ public class MainActivity extends Activity {
         weatherRequests = createWeatherRequestCoordinator();
         voiceCards = createVoiceCardController();
         voiceSession = createVoiceSessionOrchestrator();
-        voices.add(new Voice(DEFAULT_VOICE, "Doris Clone", "female"));
+        voices.add(new Voice(DEFAULT_VOICE, DEFAULT_VOICE_LABEL, "female"));
         voices.add(new Voice("zh_female_vv_jupiter_bigtts", "活泼女声（默认）", "female"));
-        voices.add(new Voice("zh_female_xiaohe_jupiter_bigtts", "甜美女声", "female"));
         voices.add(new Voice("zh_male_yunzhou_jupiter_bigtts", "沉稳男声", "male"));
         headsets = new HeadsetBindingManager(this, prefs, this::onHeadsetDevicesChanged);
         headsets.start();
@@ -1868,9 +1875,10 @@ public class MainActivity extends Activity {
             if (pendingTvAfterVideoPermission) {
                 pendingTvAfterVideoPermission = false;
                 if (granted) {
-                    showTvOverlay();
+                    showTvOverlay(pendingTvPreferredChannelId);
                 } else {
                     toastError("需要视频读取权限才能播放 /sdcard/mytv。");
+                    pendingTvPreferredChannelId = "";
                     restoreAfterFailedTvOverlayOpen();
                 }
             }
@@ -2011,6 +2019,7 @@ public class MainActivity extends Activity {
     private void showVoiceHome() {
         cancelTextModeAsr();
         exitHomeAvatarTextMode(true);
+        stopToolTtsPlayback(false);
         voiceInputSurfaceActive = true;
         messageList = null;
         messageScroll = null;
@@ -2039,6 +2048,10 @@ public class MainActivity extends Activity {
                     @Override public void onVoiceHome() { showVoiceHome(); }
                     @Override public void onToggleMic() { toggleMic(); }
                     @Override public void onHangUp() { hangUpVoiceToHome(); }
+                    @Override public void onVoicePressStart(float rawY) { startVoicePress(rawY); }
+                    @Override public void onVoicePressMove(float rawY) { moveVoicePress(rawY); }
+                    @Override public void onVoicePressEnd(float rawY) { endVoicePress(rawY); }
+                    @Override public void onVoicePressCancel() { cancelVoicePress(); }
                 });
         root = views.root;
         moodVeil = views.moodVeil;
@@ -2054,6 +2067,11 @@ public class MainActivity extends Activity {
         autoStartListeningOnVoiceSurface();
     }
 
+    private void showVoiceHomeFromManualButton() {
+        skipNextVoiceAutoStart = true;
+        showVoiceHome();
+    }
+
     private void autoStartListeningOnVoiceSurface() {
         if (skipNextVoiceAutoStart) {
             skipNextVoiceAutoStart = false;
@@ -2067,7 +2085,7 @@ public class MainActivity extends Activity {
                 ttsPlayer != null && ttsPlayer.isPlaying(),
                 mic.running,
                 inputAudioOpen,
-                isBoundHeadsetConnected())) {
+                isBoundHeadsetConnected() || tabletDemoMode())) {
             requestVoiceInputStart(true);
         }
     }
@@ -2502,6 +2520,7 @@ public class MainActivity extends Activity {
     }
 
     private void clearVoiceSurfaceViews() {
+        stopHomeSubtitleTypewriter();
         voiceLastTurnView = null;
         voiceOrbView = null;
         digitalAvatarView = null;
@@ -2569,8 +2588,11 @@ public class MainActivity extends Activity {
         clearVoiceCards(false);
         leaveVoiceSurface();
         root = baseRoot();
-        root.addView(topBar("‹", "TTS Voice", "", this::showSettings, null));
+        LinearLayout top = topBar("‹", "TTS Voice", "", this::showSettings, null);
+        root.addView(top);
         LinearLayout list = scrollableScreenList();
+        ((View) list.getParent()).bringToFront();
+        top.bringToFront();
         int[] colors = {0xFFFF5C75, 0xFFF68E68, 0xFF71BD9C, 0xFF9382C5, 0xFF6FA5CD, 0xFFD6B070};
         for (int i = 0; i < ttsVoices.size(); i++) {
             Voice voice = ttsVoices.get(i);
@@ -2608,6 +2630,40 @@ public class MainActivity extends Activity {
             ttsPlayer.setVoicePreference(selectedTtsVoiceId,
                     TtsVoiceCatalog.playbackOrder(selectedTtsVoiceId));
         }
+    }
+
+    private String preferredTtsVoiceId(SharedPreferences prefs) {
+        String saved = prefs.getString(PREF_TTS_VOICE, null);
+        if (isOldUnsupportedXiaoheTtsVoice(saved)) {
+            prefs.edit()
+                    .putString(PREF_TTS_VOICE, TtsVoiceCatalog.DEFAULT_ID)
+                    .putBoolean(PREF_TTS_VOICE_XIAOHE_MIGRATED, true)
+                    .apply();
+            return TtsVoiceCatalog.DEFAULT_ID;
+        }
+        if (!prefs.getBoolean(PREF_TTS_VOICE_XIAOHE_MIGRATED, false)
+                && shouldMigrateTtsVoiceToDefault(saved)) {
+            prefs.edit()
+                    .putString(PREF_TTS_VOICE, TtsVoiceCatalog.DEFAULT_ID)
+                    .putBoolean(PREF_TTS_VOICE_XIAOHE_MIGRATED, true)
+                    .apply();
+            return TtsVoiceCatalog.DEFAULT_ID;
+        }
+        if (saved == null || saved.trim().isEmpty()) return TtsVoiceCatalog.DEFAULT_ID;
+        return saved;
+    }
+
+    private boolean shouldMigrateTtsVoiceToDefault(String saved) {
+        return saved == null
+                || saved.trim().isEmpty()
+                || LOW_LATENCY_TTS_VOICE.equals(saved)
+                || BuildConfig.AGENTVOICE_CLONED_VOICE.equals(saved);
+    }
+
+    private boolean isOldUnsupportedXiaoheTtsVoice(String saved) {
+        return "zh_female_wanwanxiaohe_moon_bigtts".equals(saved)
+                || "zh_female_xiaohe_jupiter_bigtts".equals(saved)
+                || "zh_female_xiaohe_uranus_bigtts".equals(saved);
     }
 
     private void showSettings() {
@@ -2857,7 +2913,7 @@ public class MainActivity extends Activity {
         }
         if (voices.isEmpty()) {
             selectedVoiceId = DEFAULT_VOICE;
-            selectedVoiceLabel = "Doris Clone";
+            selectedVoiceLabel = DEFAULT_VOICE_LABEL;
             return;
         }
         int index = Math.max(0, tabletDemoCharacter.voiceSlot) % voices.size();
@@ -3068,7 +3124,7 @@ public class MainActivity extends Activity {
 
     private void updateVoiceHome() {
         String line = lastConversationLine();
-        if (voiceLastTurnView != null) voiceLastTurnView.setText(line);
+        updateVoiceSubtitle(line);
         if (moodVeil != null) moodVeil.setMood(moodForText(line));
         if (voiceOrbView != null) voiceOrbView.setConversationState(voiceState);
         if (digitalAvatarView != null) digitalAvatarView.setAvatarState(avatarEmotion, voiceState.isSpeaking());
@@ -3078,6 +3134,61 @@ public class MainActivity extends Activity {
                     ? (tabletDemoMicPaused ? "▶" : "Ⅱ")
                     : (mic.running || inputAudioOpen ? "●" : voiceButtonText()));
         }
+    }
+
+    private void updateVoiceSubtitle(String line) {
+        if (voiceLastTurnView == null) {
+            stopHomeSubtitleTypewriter();
+            return;
+        }
+        if (homeAvatarTextModeActive
+                && SubtitleTypewriterText.needsTypewriter(line, HOME_SUBTITLE_TYPEWRITER_CHARS)) {
+            startHomeSubtitleTypewriter(line);
+            return;
+        }
+        stopHomeSubtitleTypewriter();
+        voiceLastTurnView.setText(SubtitleTypewriterText.normalize(line));
+    }
+
+    private void startHomeSubtitleTypewriter(String text) {
+        String clean = SubtitleTypewriterText.normalize(text);
+        if (!clean.equals(homeSubtitleTypewriterText)) {
+            homeSubtitleTypewriterText = clean;
+            homeSubtitleTypewriterFrame = 0;
+        }
+        renderHomeSubtitleTypewriterFrame();
+        if (homeSubtitleTypewriterTicker != null) return;
+        homeSubtitleTypewriterTicker = new Runnable() {
+            @Override public void run() {
+                if (voiceLastTurnView == null || !homeAvatarTextModeActive
+                        || !SubtitleTypewriterText.needsTypewriter(
+                                homeSubtitleTypewriterText, HOME_SUBTITLE_TYPEWRITER_CHARS)) {
+                    stopHomeSubtitleTypewriter();
+                    return;
+                }
+                homeSubtitleTypewriterFrame++;
+                renderHomeSubtitleTypewriterFrame();
+                main.postDelayed(this, HOME_SUBTITLE_TYPEWRITER_INTERVAL_MS);
+            }
+        };
+        main.postDelayed(homeSubtitleTypewriterTicker, HOME_SUBTITLE_TYPEWRITER_INTERVAL_MS);
+    }
+
+    private void renderHomeSubtitleTypewriterFrame() {
+        if (voiceLastTurnView == null) return;
+        voiceLastTurnView.setText(SubtitleTypewriterText.frame(
+                homeSubtitleTypewriterText,
+                homeSubtitleTypewriterFrame,
+                HOME_SUBTITLE_TYPEWRITER_CHARS));
+    }
+
+    private void stopHomeSubtitleTypewriter() {
+        if (homeSubtitleTypewriterTicker != null) {
+            main.removeCallbacks(homeSubtitleTypewriterTicker);
+            homeSubtitleTypewriterTicker = null;
+        }
+        homeSubtitleTypewriterText = "";
+        homeSubtitleTypewriterFrame = 0;
     }
 
     private int moodForText(String text) {
@@ -3187,7 +3298,7 @@ public class MainActivity extends Activity {
     private void handleAvatarVoiceCommand(String text) {
         if (text == null) return;
         if (TvVoiceCommand.shouldOpen(text)) {
-            showTvOverlayFromCommand();
+            showTvOverlayFromCommand(TvVoiceCommand.preferredChannelId(text));
             return;
         }
         String normalized = TabletDemoVoiceCommand.normalize(text);
@@ -3304,15 +3415,19 @@ public class MainActivity extends Activity {
     }
 
     private void showTvOverlayFromCommand() {
+        showTvOverlayFromCommand("");
+    }
+
+    private void showTvOverlayFromCommand(String preferredChannelId) {
         addChatMessage("assistant", "稍等，电视打开了。");
         renderMessages();
         enterTvOverlayMode();
-        showTvOverlay();
+        showTvOverlay(preferredChannelId);
     }
 
     private void openTvFromTool(String question, boolean realtimeMode) {
         Log.d(TAG, "open tv tool realtime=" + realtimeMode + " question=" + question);
-        showTvOverlayFromCommand();
+        showTvOverlayFromCommand(TvVoiceCommand.preferredChannelId(question));
     }
 
     private void enterTvOverlayMode() {
@@ -3331,6 +3446,10 @@ public class MainActivity extends Activity {
     }
 
     private void showTvOverlay() {
+        showTvOverlay("");
+    }
+
+    private void showTvOverlay(String preferredChannelId) {
         List<TvChannel> channels = new ArrayList<>(OnlineTvPlaylist.channels());
         if (hasVideoLibraryPermission()) {
             if (MyTvPlaylist.ensureDirectory()) {
@@ -3342,6 +3461,7 @@ public class MainActivity extends Activity {
             }
         } else if (channels.isEmpty()) {
             pendingTvAfterVideoPermission = true;
+            pendingTvPreferredChannelId = preferredChannelId == null ? "" : preferredChannelId;
             requestPermissions(new String[]{videoLibraryPermission()}, REQ_VIDEO_LIBRARY);
             return;
         }
@@ -3357,7 +3477,8 @@ public class MainActivity extends Activity {
         }
         host.addView(tvOverlayView, ui.frame(-1, -1));
         tvOverlayView.bringToFront();
-        tvOverlayView.show(channels);
+        tvOverlayView.show(channels, preferredChannelId);
+        pendingTvPreferredChannelId = "";
         if (channels.isEmpty()) {
             toastError("没有可用的线上频道；也可以把视频放到 " + MyTvPlaylist.displayPath());
         }
@@ -3472,6 +3593,7 @@ public class MainActivity extends Activity {
     }
 
     private void routeOrSendText(String text) {
+        if (routeToolQuestion(text, false)) return;
         if (llmToolRoutes != null && llmToolRoutes.routeOrSend(text, false)) return;
         sendTextWithAgentLLM(text);
     }
@@ -3577,22 +3699,25 @@ public class MainActivity extends Activity {
                     runWeatherTool(question, intent.city, realtimeMode, token);
                 } catch (JSONException error) {
                     Log.d(TAG, "weather intent parse failed content=" + content);
-                    failWeatherIntent(question, realtimeMode, token);
+                    runWeatherIntentFallback(question, realtimeMode, token, "parse");
                 }
             }
 
             @Override public void onError(String message) {
                 if (seq != weatherIntentSeq) return;
                 Log.d(TAG, "weather intent failed " + message);
-                failWeatherIntent(question, realtimeMode, token);
+                runWeatherIntentFallback(question, realtimeMode, token, "error");
             }
         }, "天气意图解析");
     }
 
-    private void failWeatherIntent(String question, boolean realtimeMode, int token) {
-        if (weatherHandler == null) return;
-        weatherHandler.fail(question, "天气意图解析失败，请再说一次城市名。",
-                result -> onWeatherToolResult(result, realtimeMode, token));
+    private void runWeatherIntentFallback(String question, boolean realtimeMode, int token, String reason) {
+        WeatherIntentResolver.Result fallback = WeatherIntentResolver.fallbackFromQuestion(question);
+        Log.d(TAG, "weather intent fallback reason=" + reason
+                + " city=" + fallback.city
+                + " isWeather=" + fallback.isWeatherQuery
+                + " text=" + question);
+        runWeatherTool(question, fallback.city, realtimeMode, token);
     }
 
     private void runWeatherTool(String question, String city, boolean realtimeMode, int token) {
@@ -3918,6 +4043,74 @@ public class MainActivity extends Activity {
         textModeAsrTouchActive = false;
         textModeAsrGestureState = TextModeAsrGesture.NEUTRAL;
         cancelTextModeAsr();
+    }
+
+    private void startVoicePress(float rawY) {
+        if (isAppRunningSessionActive()) {
+            Log.d(TAG, "voice press blocked: app running active");
+            return;
+        }
+        if (isTextModeActive() || !voiceInputSurfaceActive || summaryInProgress) return;
+        voicePressTouchActive = true;
+        voicePressTouchStartY = rawY;
+        voicePressCancel = false;
+        if (!mic.running && !inputAudioOpen && voiceSession != null) {
+            voiceSession.onMicToggle();
+        }
+    }
+
+    private void moveVoicePress(float rawY) {
+        if (!voicePressTouchActive) return;
+        voicePressCancel = TextModeAsrGesture.decide(
+                rawY - voicePressTouchStartY,
+                ui == null ? TEXT_ASR_SLIDE_THRESHOLD_DP : ui.dp(TEXT_ASR_SLIDE_THRESHOLD_DP))
+                == TextModeAsrGesture.CANCEL;
+    }
+
+    private void endVoicePress(float rawY) {
+        if (!voicePressTouchActive) return;
+        moveVoicePress(rawY);
+        voicePressTouchActive = false;
+        if (voicePressCancel) {
+            cancelVoicePressCapture();
+        } else {
+            finishVoicePressCapture();
+        }
+        voicePressCancel = false;
+    }
+
+    private void cancelVoicePress() {
+        voicePressTouchActive = false;
+        voicePressCancel = false;
+        cancelVoicePressCapture();
+    }
+
+    private void finishVoicePressCapture() {
+        if (mic.running || inputAudioOpen) {
+            stopInputAudio("processing");
+        } else {
+            clearVoiceInputRequests();
+        }
+        updateVoiceHome();
+    }
+
+    private void cancelVoicePressCapture() {
+        clearVoiceInputRequests();
+        cancelAsrFinalTimeout();
+        cancelVoiceSilenceTextModeTimeout();
+        if (mic.running || inputAudioOpen) {
+            stopMicCapture();
+            inputAudioOpen = false;
+            startHerForegroundService(false);
+        }
+        voiceprintGate = null;
+        resetRealtimeOutput();
+        player.stop();
+        if (audioLevelView != null) audioLevelView.setLevel(0);
+        if (voiceOrbView != null) voiceOrbView.setLevel(0);
+        if (realtime.isOpen()) realtime.close();
+        setState("ready");
+        updateVoiceHome();
     }
 
     private void startTextModeAsr() {

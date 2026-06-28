@@ -7,7 +7,7 @@ final class TtsVoiceCatalog {
     static final String DEFAULT_ID = "zh_female_vv_uranus_bigtts";
 
     private static final Voice[] USABLE = {
-            new Voice("zh_female_vv_uranus_bigtts", "vivi 2.0", "female", "seed2"),
+            new Voice(DEFAULT_ID, "vivi 2.0", "female", "seed2"),
             new Voice("saturn_zh_female_cancan_tob", "知性灿灿", "female", "seed2"),
             new Voice("saturn_zh_female_keainvsheng_tob", "可爱女生", "female", "seed2"),
             new Voice("saturn_zh_female_tiaopigongzhu_tob", "调皮公主", "female", "seed2"),

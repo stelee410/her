@@ -1,5 +1,6 @@
 package com.linkyun.her;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -20,6 +21,16 @@ public final class OnlineTvPlaylistTest {
     public void channelsIncludeBusinessContentForFinanceDemo() {
         List<TvChannel> channels = OnlineTvPlaylist.channels();
         assertTrue(hasBusinessChannel(channels));
+    }
+
+    @Test
+    public void defaultFinanceChannelExistsInPlaylist() {
+        List<TvChannel> channels = OnlineTvPlaylist.channels();
+
+        int index = OnlineTvPlaylist.indexOfChannel(channels, OnlineTvPlaylist.DEFAULT_FINANCE_CHANNEL_ID);
+
+        assertTrue(index >= 0);
+        assertEquals("CGTN Global Biz", channels.get(index).title);
     }
 
     private static boolean hasHlsChannel(List<TvChannel> channels) {

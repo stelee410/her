@@ -37,6 +37,41 @@ public final class WeatherIntentResolverTest {
     }
 
     @Test
+    public void acceptsAlternateStructuredLocationFields() throws Exception {
+        WeatherIntentResolver.Result result = WeatherIntentResolver.parse(
+                "{\"weather\":\"true\",\"location\":\"上海\",\"reason\":\"用户问天气\"}");
+
+        assertTrue(result.isWeatherQuery);
+        assertEquals("上海", result.city);
+    }
+
+    @Test
+    public void parsesLooseWeatherResolverText() throws Exception {
+        WeatherIntentResolver.Result result = WeatherIntentResolver.parse("是天气查询，城市：深圳");
+
+        assertTrue(result.isWeatherQuery);
+        assertEquals("深圳", result.city);
+    }
+
+    @Test
+    public void localFallbackExtractsCityFromQuestion() {
+        WeatherIntentResolver.Result result =
+                WeatherIntentResolver.fallbackFromQuestion("能不能帮我查一下深圳的天气");
+
+        assertTrue(result.isWeatherQuery);
+        assertEquals("深圳", result.city);
+    }
+
+    @Test
+    public void localFallbackKeepsCityEmptyForCurrentLocationWeather() {
+        WeatherIntentResolver.Result result =
+                WeatherIntentResolver.fallbackFromQuestion("今天天气怎么样");
+
+        assertTrue(result.isWeatherQuery);
+        assertEquals("", result.city);
+    }
+
+    @Test
     public void requestPromptForbidsTreatingPolitePhrasesAsCity() throws Exception {
         JSONObject body = WeatherIntentResolver.requestBody("c-her", "Doris", "能不能帮我查一下深圳的天气");
         JSONArray messages = body.getJSONArray("messages");

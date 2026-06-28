@@ -154,6 +154,10 @@ final class RetroTvOverlayView extends FrameLayout {
     }
 
     void show(List<TvChannel> channels) {
+        show(channels, "");
+    }
+
+    void show(List<TvChannel> channels, String preferredChannelId) {
         removeStartupCallback();
         playlist.clear();
         if (channels != null) playlist.addAll(channels);
@@ -172,7 +176,8 @@ final class RetroTvOverlayView extends FrameLayout {
         emptyView.setVisibility(GONE);
         channelBug.setVisibility(GONE);
         startupView.setVisibility(VISIBLE);
-        index = Math.max(0, Math.min(index, playlist.size() - 1));
+        int preferredIndex = OnlineTvPlaylist.indexOfChannel(playlist, preferredChannelId);
+        index = preferredIndex >= 0 ? preferredIndex : Math.max(0, Math.min(index, playlist.size() - 1));
         titleView.setText("MYTV STARTUP");
         counterView.setText("AI TV");
         startupRunnable = () -> {

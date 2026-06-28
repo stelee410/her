@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 final class OnlineTvPlaylist {
+    static final String DEFAULT_FINANCE_CHANNEL_ID = "cgtn-global-biz";
+
     private OnlineTvPlaylist() {
     }
 
@@ -40,6 +42,14 @@ final class OnlineTvPlaylist {
                 "https://media.w3.org/2010/05/sintel/trailer.mp4",
                 false));
         return channels;
+    }
+
+    static int indexOfChannel(List<TvChannel> channels, String channelId) {
+        if (channels == null || channelId == null || channelId.trim().isEmpty()) return -1;
+        for (int i = 0; i < channels.size(); i++) {
+            if (channelId.equals(channels.get(i).id)) return i;
+        }
+        return -1;
     }
 
     private static TvChannel channel(String id, String title, String subtitle, String url, boolean live) {

@@ -2,11 +2,12 @@ package com.linkyun.her;
 
 final class TabletDemoCharacterCatalog {
     private static final String ROOT = "tablet_demo";
-    static final String REALTIME_SAFE_VOICE = BuildConfig.AGENTVOICE_CLONED_VOICE;
-    static final String YEDU_VOICE = "zh_female_vv_jupiter_bigtts";
-    static final String NEMU_VOICE = "zh_male_yunzhou_jupiter_bigtts";
+    static final String XIAOHE_VOICE = "zh_female_xiaohe_jupiter_bigtts";
+    static final String REALTIME_SAFE_VOICE = XIAOHE_VOICE;
+    static final String YEDU_VOICE = XIAOHE_VOICE;
+    static final String NEMU_VOICE = XIAOHE_VOICE;
     static final String KIRA_VOICE = "zh_female_xiaohe_jupiter_bigtts";
-    static final String WALLE_VOICE = "zh_male_yunzhou_jupiter_bigtts";
+    static final String WALLE_VOICE = XIAOHE_VOICE;
     static final String GRAY_VOICE = "zh_female_xiaohe_jupiter_bigtts";
 
     private static final TabletDemoCharacter[] CHARACTERS = new TabletDemoCharacter[] {
@@ -17,7 +18,7 @@ final class TabletDemoCharacterCatalog {
             character("star_5", "灰客 GRAY", 4, GRAY_VOICE)
     };
     private static final TabletDemoCharacter HIDDEN_JESS = character(
-            "jess", "Jess", 5, BuildConfig.AGENTVOICE_CLONED_VOICE);
+            "jess", "Jess", 5, XIAOHE_VOICE);
 
     private TabletDemoCharacterCatalog() {
     }

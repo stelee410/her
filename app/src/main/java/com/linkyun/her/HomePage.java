@@ -3,11 +3,13 @@ package com.linkyun.her;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -20,6 +22,11 @@ final class HomePage {
         FrameLayout root = rootState.frame;
         LinearLayout top = ui.topBar("☰", "", "Aa", callbacks::onSettings, callbacks::onChat);
         root.addView(top);
+        ImageButton call = phoneButton(activity, ui, callbacks::onVoiceHome);
+        FrameLayout.LayoutParams callParams = ui.frame(ui.dp(54), ui.dp(54), Gravity.TOP | Gravity.RIGHT);
+        callParams.topMargin = ui.dp(84);
+        callParams.rightMargin = ui.dp(22);
+        root.addView(call, callParams);
 
         LinearLayout center = new LinearLayout(activity);
         center.setOrientation(LinearLayout.VERTICAL);
@@ -50,14 +57,8 @@ final class HomePage {
         homeTimeView.setGravity(Gravity.CENTER);
         homeTimeView.setVisibility(TextView.GONE);
 
-        TextView voiceEntry = ui.text("^", 32, Color.WHITE, 700);
-        voiceEntry.setGravity(Gravity.CENTER);
-        voiceEntry.setOnClickListener(v -> callbacks.onVoiceHome());
-        FrameLayout.LayoutParams entryParams = ui.frame(ui.dp(78), ui.dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        entryParams.bottomMargin = ui.dp(24);
-        root.addView(voiceEntry, entryParams);
-
         top.bringToFront();
+        call.bringToFront();
         return new Views(root, rootState.moodVeil, null, null, null, null, null, null, null, homeTimeView, handwrittenNameView);
     }
 
@@ -85,7 +86,9 @@ final class HomePage {
         dialogue.setBackground(subtitleBackground(ui));
         TextView lastLine = ui.text(model.lastLine, 18, Color.WHITE, 0);
         lastLine.setGravity(Gravity.CENTER);
-        lastLine.setMaxLines(3);
+        lastLine.setSingleLine(true);
+        lastLine.setMaxLines(1);
+        lastLine.setEllipsize(TextUtils.TruncateAt.END);
         lastLine.setLineSpacing(ui.dp(3), 1.0f);
         lastLine.setShadowLayer(ui.dp(3), 0, ui.dp(1), 0x99000000);
         dialogue.addView(lastLine, new LinearLayout.LayoutParams(-1, -2));
@@ -95,17 +98,10 @@ final class HomePage {
         stateInDialogue.topMargin = ui.dp(6);
         dialogue.addView(stateLabel, stateInDialogue);
         FrameLayout.LayoutParams dialogueParams = ui.frame(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        dialogueParams.leftMargin = ui.dp(18);
-        dialogueParams.rightMargin = ui.dp(18);
-        dialogueParams.bottomMargin = ui.dp(172);
+        dialogueParams.leftMargin = ui.dp(40);
+        dialogueParams.rightMargin = ui.dp(40);
+        dialogueParams.bottomMargin = ui.dp(137);
         root.addView(dialogue, dialogueParams);
-
-        TextView asrHint = ui.text(TextModeAsrGesture.label(TextModeAsrGesture.NEUTRAL), 15, 0xCCFFFFFF, 0);
-        asrHint.setGravity(Gravity.CENTER);
-        asrHint.setVisibility(model.asrListening ? View.VISIBLE : View.GONE);
-        FrameLayout.LayoutParams hintParams = ui.frame(-1, ui.dp(32), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        hintParams.bottomMargin = ui.dp(124);
-        root.addView(asrHint, hintParams);
 
         View contentCard = null;
         if (model.weather != null) {
@@ -121,11 +117,14 @@ final class HomePage {
             root.addView(contentCard, cardParams);
         }
 
+        FrameLayout inputCluster = new FrameLayout(activity);
+
         ImageButton asr = new ImageButton(activity);
         asr.setImageResource(model.asrListening ? R.drawable.ic_stop_text_input : R.drawable.ic_mic_text_input);
         asr.setColorFilter(0xFFFFFFFF);
         asr.setBackground(controlBackground(ui, 0xAAFF6377, 999));
-        asr.setPadding(ui.dp(24), ui.dp(24), ui.dp(24), ui.dp(24));
+        asr.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        asr.setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(14));
         asr.setContentDescription("按住说话");
         asr.setOnTouchListener((v, event) -> {
             switch (event.getActionMasked()) {
@@ -146,16 +145,27 @@ final class HomePage {
                 return true;
             }
         });
-        FrameLayout.LayoutParams asrParams = ui.frame(ui.dp(94), ui.dp(94), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        asrParams.bottomMargin = ui.dp(20);
-        root.addView(asr, asrParams);
+        FrameLayout.LayoutParams asrButtonParams =
+                ui.frame(ui.dp(80), ui.dp(80), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        asrButtonParams.bottomMargin = ui.dp(6);
+        inputCluster.addView(asr, asrButtonParams);
+
+        TextView asrHint = ui.text(TextModeAsrGesture.label(TextModeAsrGesture.NEUTRAL), 15, 0xCCFFFFFF, 0);
+        asrHint.setGravity(Gravity.CENTER);
+        asrHint.setVisibility(model.asrListening ? View.VISIBLE : View.INVISIBLE);
+        FrameLayout.LayoutParams hintParams = ui.frame(-1, ui.dp(34), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        hintParams.bottomMargin = ui.dp(104);
+        inputCluster.addView(asrHint, hintParams);
+
+        FrameLayout.LayoutParams inputParams = ui.frame(-1, ui.dp(160), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        inputParams.bottomMargin = ui.dp(39);
+        root.addView(inputCluster, inputParams);
 
         top.bringToFront();
         call.bringToFront();
         if (contentCard != null) contentCard.bringToFront();
         dialogue.bringToFront();
-        asrHint.bringToFront();
-        asr.bringToFront();
+        inputCluster.bringToFront();
         return new Views(root, rootState.moodVeil, null, null, avatarView,
                 lastLine, stateLabel, null, null, null, null, asr, asrHint);
     }
@@ -191,7 +201,25 @@ final class HomePage {
             }
         } else {
             voiceOrbView = new VoiceOrbView(activity);
-            voiceOrbView.setOnClickListener(v -> callbacks.onToggleMic());
+            voiceOrbView.setOnTouchListener((v, event) -> {
+                switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    callbacks.onVoicePressStart(event.getRawY());
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    callbacks.onVoicePressMove(event.getRawY());
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    v.performClick();
+                    callbacks.onVoicePressEnd(event.getRawY());
+                    return true;
+                case MotionEvent.ACTION_CANCEL:
+                    callbacks.onVoicePressCancel();
+                    return true;
+                default:
+                    return true;
+                }
+            });
             center.addView(voiceOrbView, new LinearLayout.LayoutParams(ui.dp(178), ui.dp(178)));
         }
 
@@ -258,7 +286,25 @@ final class HomePage {
 
             micButton = ui.text("♩", 36, 0xFFFF6377, 0);
             micButton.setGravity(Gravity.CENTER);
-            micButton.setOnClickListener(v -> callbacks.onToggleMic());
+            micButton.setOnTouchListener((v, event) -> {
+                switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    callbacks.onVoicePressStart(event.getRawY());
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    callbacks.onVoicePressMove(event.getRawY());
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    v.performClick();
+                    callbacks.onVoicePressEnd(event.getRawY());
+                    return true;
+                case MotionEvent.ACTION_CANCEL:
+                    callbacks.onVoicePressCancel();
+                    return true;
+                default:
+                    return true;
+                }
+            });
             FrameLayout.LayoutParams micParams = ui.frame(ui.dp(78), ui.dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
             micParams.bottomMargin = ui.dp(18);
             root.addView(micButton, micParams);
@@ -327,6 +373,10 @@ final class HomePage {
         default void onAsrPressMove(float rawY) { }
         default void onAsrPressEnd(float rawY) { }
         default void onAsrPressCancel() { }
+        default void onVoicePressStart(float rawY) { }
+        default void onVoicePressMove(float rawY) { }
+        default void onVoicePressEnd(float rawY) { }
+        default void onVoicePressCancel() { }
     }
 
     static final class LandingModel {

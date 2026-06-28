@@ -53,6 +53,16 @@ public final class ToolRouterTest {
     }
 
     @Test
+    public void routesFinanceNewsToTvBeforeGenericNews() {
+        Host host = new Host();
+        ToolRouter router = new ToolRouter(ToolRegistry.defaults(), host);
+
+        assertTrue(router.routeUserText("我想了解财经新闻", false));
+
+        assertEquals("tv:我想了解财经新闻:false", host.events.get(1));
+    }
+
+    @Test
     public void trimsUserTextBeforeRouting() {
         Host host = new Host();
         ToolRouter router = new ToolRouter(ToolRegistry.defaults(), host);
