@@ -216,14 +216,18 @@ final class AgentApiClient {
             String data = trimmed.substring("data:".length()).trim();
             if (data.isEmpty() || "[DONE]".equals(data)) continue;
             JSONObject object = new JSONObject(data);
-            JSONObject choice = object.getJSONArray("choices").getJSONObject(0);
+            JSONArray choices = object.getJSONArray("choices");
+            if (choices.length() == 0) continue;
+            JSONObject choice = choices.getJSONObject(0);
             JSONObject delta = choice.optJSONObject("delta");
             if (delta != null) {
-                content.append(delta.optString("content", ""));
+                if (!delta.isNull("content")) content.append(delta.optString("content", ""));
                 continue;
             }
             JSONObject message = choice.optJSONObject("message");
-            if (message != null) content.append(message.optString("content", ""));
+            if (message != null && !message.isNull("content")) {
+                content.append(message.optString("content", ""));
+            }
         }
         return content.toString();
     }

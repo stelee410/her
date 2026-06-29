@@ -13,11 +13,14 @@ import org.json.JSONObject;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
@@ -121,6 +124,7 @@ final class GatewayTtsPlayer {
     private static final int WS_READY_TIMEOUT_MS = 9_000;
     private static final int WS_FIRST_AUDIO_TIMEOUT_MS = 2_500;
     private static final int WS_AUDIO_IDLE_COMPLETE_MS = 1_200;
+    private static final String PCM_CACHE_DIR = "tts_pcm_cache";
 
     private final String tag;
     private final OkHttpClient http;
@@ -188,6 +192,21 @@ final class GatewayTtsPlayer {
         synchronized (wsLock) {
             ensureWebSocketLocked(voiceIndex, System.currentTimeMillis(), true);
         }
+    }
+
+    void warmupIfIdle() {
+        if (playing || call != null) {
+            Log.d(tag, "gateway tts warmup skipped busy playing=" + playing
+                    + " call=" + (call != null));
+            return;
+        }
+        synchronized (wsLock) {
+            if (currentWsPlayback != null) {
+                Log.d(tag, "gateway tts warmup skipped ws playback active");
+                return;
+            }
+        }
+        warmup();
     }
 
     void play(String id, String text, Listener listener) {
@@ -798,6 +817,13 @@ final class GatewayTtsPlayer {
         if (!isCurrent(run)) return;
         String voice = voiceForIndex(voiceIndex);
         String resource = resourceForVoice(voice);
+        File pcmCacheFile = PCM_FORMAT.equals(responseFormat)
+                ? pcmCacheFile(model, voice, resource, text)
+                : null;
+        if (pcmCacheFile != null
+                && tryPlayCachedPcm(run, id, text, playback, listener, pcmCacheFile, startedAtMs)) {
+            return;
+        }
         JSONObject body = new JSONObject();
         try {
             body.put("model", model);
@@ -858,7 +884,8 @@ final class GatewayTtsPlayer {
                     return;
                 }
                 if (PCM_FORMAT.equals(responseFormat)) {
-                    streamPcmResponse(run, id, text, playback, requestCall, response, listener, startedAtMs);
+                    streamPcmResponse(run, id, text, playback, requestCall, response, listener,
+                            startedAtMs, pcmCacheFile);
                 } else {
                     playFileResponse(run, id, text, responseFormat, playback, requestCall, response, listener, voiceIndex, startedAtMs);
                 }
@@ -881,6 +908,106 @@ final class GatewayTtsPlayer {
         String clean = text.replace('\n', ' ').replace('\r', ' ').trim();
         if (clean.length() <= maxChars) return clean;
         return clean.substring(0, maxChars) + "...";
+    }
+
+    static String pcmCacheFileName(String model, String voice, String resource, String text) {
+        String key = (model == null ? "" : model) + '\n'
+                + (voice == null ? "" : voice) + '\n'
+                + (resource == null ? "" : resource) + '\n'
+                + (text == null ? "" : text);
+        return "tts_pcm_" + sha256Hex(key) + ".pcm";
+    }
+
+    private File pcmCacheFile(String model, String voice, String resource, String text) {
+        if (cacheDir == null) return null;
+        File dir = new File(cacheDir, PCM_CACHE_DIR);
+        if (!dir.exists() && !dir.mkdirs()) return null;
+        return new File(dir, pcmCacheFileName(model, voice, resource, text));
+    }
+
+    private static File pcmCacheTempFile(File cacheFile) {
+        if (cacheFile == null) return null;
+        return new File(cacheFile.getParentFile(), cacheFile.getName() + ".tmp");
+    }
+
+    private FileOutputStream openPcmCacheOutput(File cacheTemp) {
+        if (cacheTemp == null) return null;
+        try {
+            File parent = cacheTemp.getParentFile();
+            if (parent != null && !parent.exists() && !parent.mkdirs()) return null;
+            return new FileOutputStream(cacheTemp);
+        } catch (IOException error) {
+            Log.d(tag, "gateway tts cache open failed: " + error.getMessage());
+            return null;
+        }
+    }
+
+    private boolean writePcmCache(FileOutputStream cacheOut, byte[] data, int length) {
+        if (cacheOut == null || data == null || length <= 0) return true;
+        try {
+            cacheOut.write(data, 0, length);
+            return true;
+        } catch (IOException error) {
+            Log.d(tag, "gateway tts cache write failed: " + error.getMessage());
+            return false;
+        }
+    }
+
+    private void promotePcmCache(File cacheTemp, File cacheFile, long totalBytes) {
+        if (cacheTemp == null || cacheFile == null) return;
+        if (totalBytes <= 0 || !cacheTemp.exists() || cacheTemp.length() <= 0) {
+            deleteQuietly(cacheTemp);
+            return;
+        }
+        if (cacheFile.exists() && cacheFile.length() == cacheTemp.length()) {
+            deleteQuietly(cacheTemp);
+            return;
+        }
+        if (cacheFile.exists()) deleteQuietly(cacheFile);
+        boolean promoted = cacheTemp.renameTo(cacheFile);
+        if (promoted) {
+            Log.i(tag, "gateway tts cache stored bytes=" + cacheFile.length());
+        } else {
+            deleteQuietly(cacheTemp);
+            Log.d(tag, "gateway tts cache promote failed");
+        }
+    }
+
+    private static boolean isValidPcmCache(File cacheFile) {
+        return cacheFile != null
+                && cacheFile.isFile()
+                && cacheFile.length() >= 2
+                && cacheFile.length() % 2 == 0;
+    }
+
+    private static void closeQuietly(FileOutputStream out) {
+        if (out == null) return;
+        try {
+            out.close();
+        } catch (IOException ignored) { }
+    }
+
+    private static void deleteQuietly(File file) {
+        if (file == null) return;
+        try {
+            if (file.exists()) file.delete();
+        } catch (Exception ignored) { }
+    }
+
+    private static String sha256Hex(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                String hex = Integer.toHexString(b & 0xFF);
+                if (hex.length() == 1) out.append('0');
+                out.append(hex);
+            }
+            return out.toString();
+        } catch (NoSuchAlgorithmException error) {
+            return Integer.toHexString(value.hashCode());
+        }
     }
 
     private static String[] sanitizeVoices(String[] rawVoices) {
@@ -939,7 +1066,8 @@ final class GatewayTtsPlayer {
 
     private void streamPcmResponse(int run, String id, String text, PlaybackOptions playback,
             Call requestCall,
-            Response response, Listener listener, long requestStartedAtMs) throws IOException {
+            Response response, Listener listener, long requestStartedAtMs, File pcmCacheFile)
+            throws IOException {
         if (response.body() == null) {
             clearCallIfOwned(requestCall);
             postError(run, listener, id, "empty audio");
@@ -949,6 +1077,9 @@ final class GatewayTtsPlayer {
         boolean started = false;
         long totalBytes = 0;
         long streamStartedAtMs = 0;
+        File cacheTemp = pcmCacheTempFile(pcmCacheFile);
+        FileOutputStream cacheOut = openPcmCacheOutput(cacheTemp);
+        boolean cacheWriteFailed = false;
         try (Response ignored = response; InputStream in = response.body().byteStream()) {
             track = createStreamTrack(playback);
             track.setVolume(playback.volumeGain);
@@ -973,6 +1104,13 @@ final class GatewayTtsPlayer {
                     postStarted(run, listener, id, text);
                 }
                 int written = track.write(alignedBuffer, 0, alignedBytes);
+                if (cacheOut != null && !cacheWriteFailed
+                        && !writePcmCache(cacheOut, alignedBuffer, alignedBytes)) {
+                    cacheWriteFailed = true;
+                    closeQuietly(cacheOut);
+                    cacheOut = null;
+                    deleteQuietly(cacheTemp);
+                }
                 if (written > 0) totalBytes += written;
             }
             if (sampleBuffer.hasPendingByte()) {
@@ -984,9 +1122,12 @@ final class GatewayTtsPlayer {
         } catch (IOException error) {
             if (!isCurrent(run)) return;
             Log.d(tag, "gateway tts stream failed id=" + id + " message=" + error.getMessage());
+            deleteQuietly(cacheTemp);
             postError(run, listener, id, error.getMessage());
             return;
         } finally {
+            closeQuietly(cacheOut);
+            if (!isCurrent(run)) deleteQuietly(cacheTemp);
             clearCallIfOwned(requestCall);
             stopStreamTrackIfOwned(track);
         }
@@ -999,7 +1140,74 @@ final class GatewayTtsPlayer {
         Log.i(tag, "gateway tts stream completed id=" + id
                 + " elapsedMs=" + elapsedSince(requestStartedAtMs)
                 + " bytes=" + totalBytes);
-        warmup();
+        if (!cacheWriteFailed) promotePcmCache(cacheTemp, pcmCacheFile, totalBytes);
+        warmupIfIdle();
+        postCompleted(run, listener, id);
+    }
+
+    private boolean tryPlayCachedPcm(int run, String id, String text, PlaybackOptions playback,
+            Listener listener, File pcmCacheFile, long requestStartedAtMs) {
+        if (!isValidPcmCache(pcmCacheFile)) return false;
+        long bytes = pcmCacheFile.length();
+        Log.i(tag, "gateway tts cache hit id=" + id
+                + " bytes=" + bytes
+                + " elapsedMs=" + elapsedSince(requestStartedAtMs));
+        Thread playbackThread = new Thread(() -> playCachedPcm(run, id, text, playback,
+                listener, pcmCacheFile, requestStartedAtMs), "her-tts-cache");
+        playbackThread.start();
+        return true;
+    }
+
+    private void playCachedPcm(int run, String id, String text, PlaybackOptions playback,
+            Listener listener, File pcmCacheFile, long requestStartedAtMs) {
+        if (!isCurrent(run)) return;
+        AudioTrack track = null;
+        boolean started = false;
+        long totalBytes = 0;
+        long streamStartedAtMs = 0;
+        try (InputStream in = new FileInputStream(pcmCacheFile)) {
+            track = createStreamTrack(playback);
+            track.setVolume(playback.volumeGain);
+            if (!isCurrent(run)) return;
+            streamTrack = track;
+            playing = true;
+            byte[] buffer = new byte[STREAM_CHUNK_BYTES];
+            int read;
+            while (isCurrent(run) && (read = in.read(buffer)) != -1) {
+                if (read == 0) continue;
+                if (!started) {
+                    started = true;
+                    streamStartedAtMs = System.currentTimeMillis();
+                    Log.i(tag, "gateway tts cache started id=" + id
+                            + " elapsedMs=" + elapsedSince(requestStartedAtMs));
+                    postStarted(run, listener, id, text);
+                }
+                int written = track.write(buffer, 0, read);
+                if (written > 0) totalBytes += written;
+            }
+            if (isCurrent(run) && started) {
+                waitForStreamDrain(run, streamStartedAtMs, totalBytes);
+            }
+        } catch (Exception error) {
+            if (!isCurrent(run)) return;
+            Log.d(tag, "gateway tts cache failed id=" + id + " message=" + error.getMessage());
+            deleteQuietly(pcmCacheFile);
+            postError(run, listener, id, error.getMessage());
+            return;
+        } finally {
+            stopStreamTrackIfOwned(track);
+        }
+        if (!isCurrent(run)) return;
+        if (!started || totalBytes == 0) {
+            Log.i(tag, "gateway tts cache empty id=" + id);
+            deleteQuietly(pcmCacheFile);
+            postError(run, listener, id, "empty cached audio");
+            return;
+        }
+        Log.i(tag, "gateway tts cache completed id=" + id
+                + " elapsedMs=" + elapsedSince(requestStartedAtMs)
+                + " bytes=" + totalBytes);
+        warmupIfIdle();
         postCompleted(run, listener, id);
     }
 

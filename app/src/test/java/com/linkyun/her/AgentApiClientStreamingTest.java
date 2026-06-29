@@ -17,6 +17,27 @@ public final class AgentApiClientStreamingTest {
     }
 
     @Test
+    public void skipsUsageOnlyStreamingChunks() throws Exception {
+        String sse = ""
+                + "data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n\n"
+                + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\n"
+                + "data: [DONE]\n";
+
+        assertEquals("好", AgentApiClient.extractStreamingAssistantContent(sse));
+    }
+
+    @Test
+    public void skipsNullStreamingContent() throws Exception {
+        String sse = ""
+                + "data: {\"choices\":[{\"delta\":{\"content\":null}}]}\n\n"
+                + "data: {\"choices\":[{\"delta\":{\"content\":\"云\"}}]}\n\n"
+                + "data: {\"choices\":[{\"message\":{\"content\":null}}]}\n\n"
+                + "data: [DONE]\n";
+
+        assertEquals("云", AgentApiClient.extractStreamingAssistantContent(sse));
+    }
+
+    @Test
     public void autoDetectsStreamingOrPlainJsonResponses() throws Exception {
         String json = "{\"choices\":[{\"message\":{\"content\":\"普通回复\"}}]}";
         String sse = "data: {\"choices\":[{\"delta\":{\"content\":\"流式\"}}]}\n";

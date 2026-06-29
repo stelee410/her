@@ -422,8 +422,20 @@ public class MainActivity extends Activity {
             beginInitialization("");
         }
         loadVoices();
+        requestIdleTtsWarmup();
+        scheduleIdleTtsWarmup();
         handleTabletDemoNfcIntent(getIntent());
         handleVoiceCommandIntent(getIntent());
+    }
+
+    private void requestIdleTtsWarmup() {
+        if (ttsPlayer != null) ttsPlayer.warmupIfIdle();
+    }
+
+    private void scheduleIdleTtsWarmup() {
+        main.postDelayed(() -> {
+            requestIdleTtsWarmup();
+        }, 2_000);
     }
 
     @Override
@@ -3948,6 +3960,7 @@ public class MainActivity extends Activity {
     }
 
     private void sendTextWithAgentLLM(String text) {
+        requestIdleTtsWarmup();
         if (chatController != null) chatController.sendText(text);
     }
 
